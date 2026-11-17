@@ -2060,6 +2060,15 @@
 
   // ---------- onset detection ----------
   var lastRms = 0, onsetCooldown = 0;
+  var belowOnsetSinceMs = 0;
+  // How long the signal is allowed to have been sitting at/below the onset
+  // threshold before a rise back above it still counts as a genuine new
+  // attack. A real bow catch is a fast transient (tens of ms); this
+  // instrument's own natural swell-in can take 200ms+ to climb the same
+  // distance with no real attack at all. Kept short on purpose — false
+  // splits (cutting one note into two) are worse than an occasional missed
+  // one, so this errs conservative.
+  var ONSET_MAX_RISE_MS = 60;
 
   // closes out whatever note is currently being held (if any), pushing it to
   // `segments` — the same blobs drawn on the staff graph — and, in book
@@ -2086,8 +2095,19 @@
 
     var onsetThresh = Math.max(0.025, NOISE_FLOOR * 6);
     var onsetNow = rms > onsetThresh && lastRms <= onsetThresh && now - onsetCooldown > 150;
+    // Explicit attack-time measurement: belowOnsetSinceMs marks when the
+    // CURRENT stretch at/below onsetThresh began (set once, not refreshed
+    // every frame it stays low — same idea as reattackDipAt below). Read
+    // it BEFORE this frame's own update, so "how long was it low" reflects
+    // the stretch that's ending right now, not a reset-to-zero value.
+    var attackWasFast = onsetNow && belowOnsetSinceMs && (now - belowOnsetSinceMs) <= ONSET_MAX_RISE_MS;
     if (onsetNow) onsetCooldown = now;
     lastRms = rms;
+    if (rms <= onsetThresh) {
+      if (!belowOnsetSinceMs) belowOnsetSinceMs = now;
+    } else {
+      belowOnsetSinceMs = 0;
+    }
 
     // "sounding" means both above the absolute floor AND not a big relative
     // dip from the recent sustained level — a forte note that briefly drops
@@ -2194,17 +2214,12 @@
     // of its own life, not from an actual second stroke.
     var noteIsStable = curSegment && (activeMs - reattackStableSinceMs) > REATTACK_MIN_STABLE_MS;
     var reattackNow = (reattackHit || fluxHit) && noteIsStable;
-    // A real recording showed onsetNow has a second, separate false-positive
-    // mode the stability gate above doesn't touch: this instrument's attack
-    // can be a slow, smooth swell-in (rms climbing continuously for 200ms+
-    // with no dip at all) that happens to cross onsetThresh for the very
-    // first time well after the note already started — onsetNow's "was I
-    // below the threshold last frame" check can't tell that apart from a
-    // genuine second stroke. The real second-stroke case always has the
-    // note's own (slow-release) baseline already sitting clearly above the
-    // threshold beforehand, since it was loud before dipping; a first-ever
-    // climb never does, because the baseline is climbing right alongside it.
-    var onsetSplit = onsetNow && noteIsStable && (prevReattackBaseline || 0) > onsetThresh * 1.3;
+    // onsetNow's own "was I below the threshold last frame" check can't
+    // tell a genuine fast bow catch from a slow, smooth swell-in that
+    // happens to cross the same bar — attackWasFast (computed above) is
+    // the direct fix: require the climb itself to have been quick, not
+    // just infer it indirectly from the baseline's level.
+    var onsetSplit = onsetNow && noteIsStable && attackWasFast;
 
     // A re-bowed/re-tongued repeat of the SAME pitch never shows up as a
     // committedMidi change, and legato bowing may never dip to true silence
