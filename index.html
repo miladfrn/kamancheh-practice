@@ -945,6 +945,7 @@
   var reattackBaseline = 0, reattackDipAt = 0, reattackCooldown = 0;
   var reattackStableSinceMs = 0;
   var fluxBaseline = 0, prevSpectrum = null;
+  var REATTACK_ARM_MULT = 3; // only arm re-attack detection once the sustained level is clearly real playing, not borderline/ambient noise that happens to cross the general sound-active floor
   var REATTACK_DIP_RATIO = 0.72, REATTACK_RISE_RATIO = 0.88;
   var REATTACK_MAX_GAP_MS = 150, REATTACK_COOLDOWN_MS = 90, REATTACK_MIN_STABLE_MS = 70;
   var REATTACK_FLUX_MULT = 2.2, REATTACK_FLUX_FLOOR = 0.02;
@@ -2045,6 +2046,13 @@
     // from BEFORE this frame's update for the rise check, so a fast-rising
     // baseline can't chase the very rise it's supposed to be detecting.
     var reattackHit = false;
+    // "armed" = the sustained level is clearly real playing, several times
+    // the noise floor — not just technically above it. Without this, a
+    // quiet, steady hum/hiss/interference tone that happens to sit right at
+    // the sound-active threshold gets its ordinary micro-fluctuations read
+    // as a string of fake bow changes, all on the one (often wrongly very
+    // high) pitch that tone autocorrelates to.
+    var reattackArmed = reattackBaseline > NOISE_FLOOR * REATTACK_ARM_MULT;
     if (soundActive) {
       var prevReattackBaseline = reattackBaseline;
       if (rms < prevReattackBaseline * REATTACK_DIP_RATIO) {
@@ -2053,7 +2061,7 @@
         // fire a false re-attack whenever it eventually rose back up
         if (!reattackDipAt) reattackDipAt = now;
       } else {
-        if (reattackDipAt && now - reattackDipAt < REATTACK_MAX_GAP_MS &&
+        if (reattackArmed && reattackDipAt && now - reattackDipAt < REATTACK_MAX_GAP_MS &&
             rms > prevReattackBaseline * REATTACK_RISE_RATIO &&
             now - reattackCooldown > REATTACK_COOLDOWN_MS) {
           reattackHit = true;
@@ -2084,7 +2092,7 @@
     // threshold against the baseline from BEFORE this frame's nudge, same
     // reason as cue 1 — otherwise the spike itself slightly raises the bar
     // it's being measured against
-    var fluxHit = soundActive && flux > Math.max(REATTACK_FLUX_FLOOR, fluxBaseline * REATTACK_FLUX_MULT) &&
+    var fluxHit = soundActive && reattackArmed && flux > Math.max(REATTACK_FLUX_FLOOR, fluxBaseline * REATTACK_FLUX_MULT) &&
       now - reattackCooldown > REATTACK_COOLDOWN_MS;
     fluxBaseline += 0.05 * (flux - fluxBaseline);
     if (fluxHit) reattackCooldown = now;
