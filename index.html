@@ -881,6 +881,9 @@
     // otherwise block re-attack detection until activeMs catches back up to it
     reattackStableSinceMs = 0; reattackBaseline = 0; reattackDipAt = 0;
     fluxBaseline = 0; prevSpectrum = null;
+    rhythmNotes = []; rhythmUnitMs = null;
+    updateRhythmStats();
+    if (activeTab === "rhythm") { fitRhythmPanel(); drawRhythmPanel(); }
   }
 
   function beginSession(msg) {
@@ -1840,7 +1843,10 @@
     rhythmCtx.textAlign = "left";
     rhythmCtx.fillText(noteLabel(note.midi), 4, c + 3.5);
 
-    rhythmCtx.strokeStyle = color;
+    // The row itself (note name + bar) stays white regardless of timing -
+    // only the error percentage is colored by severity, so the eye goes
+    // straight to the one number that actually matters.
+    rhythmCtx.strokeStyle = isLive ? "#eef3fb" : note.outlier ? "#5d6a85" : "#eef3fb";
     rhythmCtx.lineWidth = 2;
     if (isLive) rhythmCtx.setLineDash([3, 2]); else rhythmCtx.setLineDash([]);
     rhythmCtx.beginPath();
@@ -1860,14 +1866,22 @@
       rhythmCtx.fillStyle = "#eef3fb";
       rhythmCtx.beginPath(); rhythmCtx.arc(tipX, c, 3, 0, Math.PI * 2); rhythmCtx.fill();
       rhythmCtx.globalAlpha = 1;
-    } else {
+    } else if (note.outlier) {
       rhythmCtx.fillStyle = color;
       rhythmCtx.font = "10px 'JetBrains Mono', monospace";
-      var label = note.outlier ? "×" : (function () {
-        var e = rhythmErrorAgainst(note.durationMs, unit);
-        return (e >= 0 ? "+" : "") + Math.round(e) + "%";
-      })();
-      rhythmCtx.fillText(label, tipX + 6, c + 3.5);
+      rhythmCtx.fillText("×", tipX + 6, c + 3.5);
+    } else {
+      // Number drawn larger than the "%" sign, so the magnitude reads at a
+      // glance while the sign stays a quiet unit label, not competing for
+      // attention.
+      rhythmCtx.fillStyle = color;
+      var e = rhythmErrorAgainst(note.durationMs, unit);
+      var numLabel = (e >= 0 ? "+" : "") + Math.round(e);
+      rhythmCtx.font = "13px 'JetBrains Mono', monospace";
+      rhythmCtx.fillText(numLabel, tipX + 6, c + 4.5);
+      var numW = rhythmCtx.measureText(numLabel).width;
+      rhythmCtx.font = "10px 'JetBrains Mono', monospace";
+      rhythmCtx.fillText("%", tipX + 7 + numW, c + 3.5);
     }
   }
   function drawRhythmPanel() {
