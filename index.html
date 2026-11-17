@@ -714,8 +714,11 @@
         });
         bookCursor = bookStartNote;
         bookEstBeatMs = null; bookWrongFlashUntil = 0;
-        setBookRefFollow(true);
       }
+      // a new recording always starts caught up to "now", in every tab/panel,
+      // even if a previous session had been manually scrolled away from live
+      setFollowMode(true);
+      setBookRefFollow(true);
     }
     sessionStarted = true;
     sessionPaused = false;
@@ -860,6 +863,11 @@
     var rect = scopeScroll.getBoundingClientRect();
     panelH = scopeCanvases.getBoundingClientRect().height || (rect.height - AXIS_H);
     resizeCanvasesToWidth(Math.max(rect.width, usedWidthPx()));
+    // the gutter's note labels are positioned from panelH too, so any deferred
+    // re-measure (e.g. the mobile layout-settle remeasure after mic grant)
+    // needs to redo them too, or they stay stuck at the stale initial layout
+    // until the user happens to switch tabs
+    if (isStaffLike(activeTab)) renderGutterNotes();
     if (activeTab === "book") { fitBookRef(); drawBookRef(); followBookRef(); }
   }
   window.addEventListener("resize", fitScopes);
