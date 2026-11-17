@@ -716,7 +716,8 @@
   });
 
   // ---------- audio graph ----------
-  var audioCtx = null, analyser = null, sourceNode = null, gainNode = null, buf = null;
+  var audioCtx = null, analyser = null, sourceNode = null, gainNode = null, buf = null, freqBuf = null;
+  var fluxLoBin = 0, fluxHiBin = 0;
   var micRunning = false;
   var inputGain = 6; // boosts quiet sources (singing, far mic) so detection still triggers
 
@@ -740,7 +741,15 @@
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0; // own smoothing below, not the analyser's built-in temporal blur
       buf = new Float32Array(analyser.fftSize);
+      freqBuf = new Float32Array(analyser.frequencyBinCount);
+      // re-attack spectral cue only looks at ~300Hz-8kHz: skip the fundamental/hum
+      // region (that's what the dip-then-rise energy check is for) and anything
+      // above 8kHz (just noise on a phone mic)
+      var binHz = audioCtx.sampleRate / analyser.fftSize;
+      fluxLoBin = Math.max(1, Math.round(300 / binHz));
+      fluxHiBin = Math.min(freqBuf.length - 1, Math.round(8000 / binHz));
       sourceNode = audioCtx.createMediaStreamSource(stream);
       gainNode = audioCtx.createGain();
       gainNode.gain.value = inputGain;
@@ -771,6 +780,10 @@
     scatterPoints = [];
     activeMs = 0; windowStart = 0; lastFrameNow = null;
     lastDotPc = null; lastCanvasWidthPx = -1;
+    // a stale reattackStableSinceMs from a previous (longer) session would
+    // otherwise block re-attack detection until activeMs catches back up to it
+    reattackStableSinceMs = 0; reattackBaseline = 0; reattackDipAt = 0;
+    fluxBaseline = 0; prevSpectrum = null;
   }
 
   function beginSession(msg) {
@@ -915,6 +928,26 @@
   var soundActive = false, lastSoundAt = 0;
   var recentLevel = 0; // tracks the recent SUSTAINED (non-dip) playing level
   var activeMs = 0, lastFrameNow = null;
+
+  // ---------- re-attack detection: a bow change (up-bow/down-bow) on the
+  // SAME pitch never shows up as a committedMidi change, and the dip between
+  // strokes is often shallow and brief rather than real silence. Two cues,
+  // either one can fire a re-attack:
+  //  1. a RELATIVE dip-then-rise against a fast-attack/slow-release baseline
+  //     (same shape as a compressor sidechain) — the slow release keeps the
+  //     baseline from sagging into a brief dip, so the rise afterward still
+  //     reads as "back up near where this note was sitting," not just noise.
+  //  2. spectral flux in the ~300Hz-8kHz band — a fresh bow stroke tends to
+  //     re-energize upper harmonics even when the broadband RMS barely dips.
+  // These thresholds are a starting point, not a validated result — there is
+  // no published algorithm for this exact case (same-pitch re-attack on a
+  // bowed string); expect to retune REATTACK_* against real playing.
+  var reattackBaseline = 0, reattackDipAt = 0, reattackCooldown = 0;
+  var reattackStableSinceMs = 0;
+  var fluxBaseline = 0, prevSpectrum = null;
+  var REATTACK_DIP_RATIO = 0.72, REATTACK_RISE_RATIO = 0.88;
+  var REATTACK_MAX_GAP_MS = 150, REATTACK_COOLDOWN_MS = 90, REATTACK_MIN_STABLE_MS = 70;
+  var REATTACK_FLUX_MULT = 2.2, REATTACK_FLUX_FLOOR = 0.02;
   var windowStart = 0;
 
   var segments = [];       // contour runs: {midi, points:[{ms,cents}]}
@@ -2007,14 +2040,71 @@
     if (soundActive) feedPitch(freq, now);
     updateLiveNoteUI();
 
+    // Re-attack cue 1: relative dip-then-rise against a fast-attack/slow-
+    // release baseline (see the var block above for why). Uses the baseline
+    // from BEFORE this frame's update for the rise check, so a fast-rising
+    // baseline can't chase the very rise it's supposed to be detecting.
+    var reattackHit = false;
+    if (soundActive) {
+      var prevReattackBaseline = reattackBaseline;
+      if (rms < prevReattackBaseline * REATTACK_DIP_RATIO) {
+        // mark the START of this dip episode only — NOT every frame still
+        // below the ratio, or a long dip would keep looking "recent" and
+        // fire a false re-attack whenever it eventually rose back up
+        if (!reattackDipAt) reattackDipAt = now;
+      } else {
+        if (reattackDipAt && now - reattackDipAt < REATTACK_MAX_GAP_MS &&
+            rms > prevReattackBaseline * REATTACK_RISE_RATIO &&
+            now - reattackCooldown > REATTACK_COOLDOWN_MS) {
+          reattackHit = true;
+          reattackCooldown = now;
+        }
+        reattackDipAt = 0; // dip episode over, recovered or timed out either way
+      }
+      reattackBaseline += (rms > reattackBaseline ? 0.5 : 0.03) * (rms - reattackBaseline);
+    } else {
+      reattackDipAt = 0;
+      reattackBaseline *= 0.98;
+    }
+
+    // Re-attack cue 2: spectral flux in the ~300Hz-8kHz band (upper
+    // harmonics re-energizing on a fresh bow stroke) — reuses this same
+    // analyser node, no extra FFT.
+    analyser.getFloatFrequencyData(freqBuf);
+    var flux = 0;
+    if (prevSpectrum) {
+      for (var fb = fluxLoBin; fb <= fluxHiBin; fb++) {
+        var d = Math.pow(10, freqBuf[fb] / 20) - Math.pow(10, prevSpectrum[fb] / 20);
+        if (d > 0) flux += d;
+      }
+    } else {
+      prevSpectrum = new Float32Array(freqBuf.length);
+    }
+    prevSpectrum.set(freqBuf);
+    // threshold against the baseline from BEFORE this frame's nudge, same
+    // reason as cue 1 — otherwise the spike itself slightly raises the bar
+    // it's being measured against
+    var fluxHit = soundActive && flux > Math.max(REATTACK_FLUX_FLOOR, fluxBaseline * REATTACK_FLUX_MULT) &&
+      now - reattackCooldown > REATTACK_COOLDOWN_MS;
+    fluxBaseline += 0.05 * (flux - fluxBaseline);
+    if (fluxHit) reattackCooldown = now;
+
+    // Only let a re-attack cue force a fresh note once the pitch has been
+    // holding steady for a bit — a genuine pitch CHANGE already splits the
+    // segment on its own a few lines below, so this is specifically for
+    // "same pitch, new bow stroke."
+    var reattackNow = (reattackHit || fluxHit) && curSegment &&
+      (activeMs - reattackStableSinceMs) > REATTACK_MIN_STABLE_MS;
+
     // A re-bowed/re-tongued repeat of the SAME pitch never shows up as a
     // committedMidi change, and legato bowing may never dip to true silence
-    // either — so on its own, book practice can't tell "one long note" from
-    // "the same note played twice in a row". The onset detector (already
-    // used for auto-tempo) catches the brief attack transient either way;
-    // forcing curSegment to end right there gives every new attack a fresh
-    // blob to read off the staff graph, independent of silence detection.
-    if (onsetNow && activeTab === "book" && sessionStarted && !sessionPaused && curSegment) {
+    // either — so on its own, this app can't tell "one long note" from "the
+    // same note played twice in a row." onsetNow (an absolute level crossing,
+    // for a real attack out of near-silence) and reattackNow (the relative/
+    // spectral cues above, for a shallow legato bow change) cover the two
+    // different cases; forcing curSegment to end on either gives every new
+    // attack a fresh blob, in every tab — not just Book Practice.
+    if ((onsetNow || reattackNow) && sessionStarted && !sessionPaused && curSegment) {
       endCurrentSegment(activeMs);
     }
 
@@ -2036,6 +2126,7 @@
           if (!curSegment || curSegment.midi !== committedMidi) {
             endCurrentSegment(activeMs);
             curSegment = { midi: committedMidi, points: [] };
+            reattackStableSinceMs = activeMs;
           }
           curSegment.points.push({ ms: activeMs, cents: committedCentsEMA });
           if (curSegment.points.length > 400) curSegment.points.shift();
