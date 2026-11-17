@@ -711,11 +711,42 @@
     updateGutterAndOffsets();
   });
 
+  // Per-device settings (localStorage, not cookies - this is a static page
+  // with no server to send cookies to, and localStorage is the standard
+  // tool for "remember this on THIS browser/device" - note it does NOT
+  // sync between a phone and a laptop; each remembers its own).
+  var SETTINGS_KEY = "kamanchehPracticeSettings";
+  function saveSettings() {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+        a4: a4, rhythmLowExp: rhythmLowExp, rhythmHighExp: rhythmHighExp
+      }));
+    } catch (e) { /* storage blocked/unavailable - setting just won't persist */ }
+  }
+  function loadSettings() {
+    try {
+      var raw = localStorage.getItem(SETTINGS_KEY);
+      if (!raw) return;
+      var s = JSON.parse(raw);
+      // Set the rhythm zoom fields FIRST: setA4 below calls saveSettings()
+      // itself, which snapshots whatever rhythmLowExp/rhythmHighExp hold at
+      // that moment - calling it before these are applied would overwrite
+      // the stored zoom with the still-default values.
+      if (typeof s.rhythmLowExp === "number" && typeof s.rhythmHighExp === "number") {
+        rhythmHighExp = Math.max(RHYTHM_EXP_MIN + 1, Math.min(RHYTHM_EXP_MAX, s.rhythmHighExp));
+        rhythmLowExp = Math.max(RHYTHM_EXP_MIN, Math.min(rhythmHighExp - 1, s.rhythmLowExp));
+        fitRhythmPanel(); drawRhythmPanel();
+      }
+      if (typeof s.a4 === "number") setA4(s.a4);
+    } catch (e) { /* corrupt/blocked storage - just keep the defaults */ }
+  }
+
   function setA4(v) {
     v = Math.max(300, Math.min(600, Math.round(v)));
     a4 = v;
     a4input.value = v;
     tempoReadoutA4.textContent = "A4:" + v + "Hz";
+    saveSettings();
   }
   a4input.addEventListener("change", function () {
     var v = parseFloat(a4input.value);
@@ -1974,19 +2005,19 @@
   }
   rhythmZoomLowOut.addEventListener("click", function () {
     rhythmLowExp = Math.max(RHYTHM_EXP_MIN, rhythmLowExp - 1);
-    fitRhythmPanel(); drawRhythmPanel();
+    fitRhythmPanel(); drawRhythmPanel(); saveSettings();
   });
   rhythmZoomLowIn.addEventListener("click", function () {
     rhythmLowExp = Math.min(rhythmHighExp - 1, rhythmLowExp + 1);
-    fitRhythmPanel(); drawRhythmPanel();
+    fitRhythmPanel(); drawRhythmPanel(); saveSettings();
   });
   rhythmZoomHighOut.addEventListener("click", function () {
     rhythmHighExp = Math.max(rhythmLowExp + 1, rhythmHighExp - 1);
-    fitRhythmPanel(); drawRhythmPanel();
+    fitRhythmPanel(); drawRhythmPanel(); saveSettings();
   });
   rhythmZoomHighIn.addEventListener("click", function () {
     rhythmHighExp = Math.min(RHYTHM_EXP_MAX, rhythmHighExp + 1);
-    fitRhythmPanel(); drawRhythmPanel();
+    fitRhythmPanel(); drawRhythmPanel(); saveSettings();
   });
 
   // ---------- staff panel: real time, shows what you actually played ----------
@@ -2485,6 +2516,7 @@
     requestAnimationFrame(loop);
   }
 
+  loadSettings();
   updateGutterAndOffsets();
   loadPieceIndex();
 
