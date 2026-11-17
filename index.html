@@ -1999,7 +1999,12 @@
     var wasActive = soundActive;
     soundActive = (now - lastSoundAt) < SILENCE_HOLD_MS;
 
-    feedPitch(freq, now);
+    // Only commit pitch while there's actually sound above the noise floor
+    // (same threshold the sensitivity setting already tunes) — otherwise
+    // room noise/hum that the autocorrelator happens to read as *some*
+    // frequency keeps nudging committedMidi around during silence, which
+    // shows up as a stream of tiny, random-pitched notes nobody played.
+    if (soundActive) feedPitch(freq, now);
     updateLiveNoteUI();
 
     // A re-bowed/re-tongued repeat of the SAME pitch never shows up as a
