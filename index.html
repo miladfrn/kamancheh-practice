@@ -529,7 +529,21 @@
   }
   var E4_STEP = diatonicStep(64); // bottom staff line reference
 
-  // Autocorrelation pitch detector (ACF2+), good for monophonic bowed strings and voice.
+  // McLeod Pitch Method (MPM) — replaced plain autocorrelation (ACF2+) with
+  // this because ACF2+ would occasionally lock onto an octave-related
+  // harmonic instead of the true fundamental (confirmed on a real kamancheh
+  // recording: a stable note would intermittently misread as something an
+  // octave-plus away, which then showed up as a stream of bogus short notes
+  // downstream). MPM's fix is twofold: (1) the autocorrelation at each lag
+  // is normalized by the local energy at that lag (the NSDF below), instead
+  // of comparing raw, unnormalized sums whose scale naturally shrinks as lag
+  // grows; and (2) peak-picking takes the FIRST "key maximum" — the first
+  // peak that's at least KEY_MAX_FRACTION of the overall best one — rather
+  // than the single highest peak, which is specifically what stops it from
+  // preferring a taller-but-wrong harmonic peak over the (slightly lower,
+  // but correct) fundamental's peak.
+  var KEY_MAX_FRACTION = 0.93;
+  var NSDF_CLARITY_MIN = 0.8; // below this, treat it as noise/no clear pitch — tuned against a real recording (0.5 let ambient hum through as a confident, wrong, held note)
   function autoCorrelate(buf, sampleRate) {
     var SIZE = buf.length;
     var rms = 0;
@@ -541,29 +555,51 @@
     // so "High"/"High+" really do reach quieter playing, not just gaps.
     if (rms < NOISE_FLOOR) return -1;
 
-    var r1 = 0, r2 = SIZE - 1, thres = 0.15;
-    for (var i2 = 0; i2 < SIZE / 2; i2++) { if (Math.abs(buf[i2]) < thres) { r1 = i2; break; } }
-    for (var i3 = 1; i3 < SIZE / 2; i3++) { if (Math.abs(buf[SIZE - i3]) < thres) { r2 = SIZE - i3; break; } }
-
-    var trimmed = buf.slice(r1, r2);
-    var n = trimmed.length;
-    var c = new Array(n).fill(0);
-    for (var lag = 0; lag < n; lag++) {
-      for (var j = 0; j < n - lag; j++) c[lag] += trimmed[j] * trimmed[j + lag];
+    var maxLag = Math.floor(SIZE / 2);
+    var nsdf = new Float32Array(maxLag);
+    for (var tau = 0; tau < maxLag; tau++) {
+      var acf = 0, divisor = 0;
+      for (var j = 0; j < SIZE - tau; j++) {
+        acf += buf[j] * buf[j + tau];
+        divisor += buf[j] * buf[j] + buf[j + tau] * buf[j + tau];
+      }
+      nsdf[tau] = divisor > 0 ? (2 * acf) / divisor : 0;
     }
-    var d = 0; while (c[d] > c[d + 1]) d++;
-    var maxval = -1, maxpos = -1;
-    for (var k = d; k < n; k++) { if (c[k] > maxval) { maxval = c[k]; maxpos = k; } }
-    var T0 = maxpos;
-    if (T0 <= 0) return -1;
-    // clarity: how strong the best periodic match is relative to total signal
-    // energy (c[0]). Noise has no real periodicity, so *some* lag always
-    // looks like a weak "best" match — without this check that gets reported
-    // as a confident pitch even from silence/room noise.
-    if (c[0] <= 0 || maxval / c[0] < 0.85) return -1;
-    var x1 = c[T0 - 1] || c[T0], x2 = c[T0], x3 = c[T0 + 1] || c[T0];
+
+    // "key maxima": the local max within each stretch of the NSDF that
+    // starts at a negative-to-positive zero crossing — skips the trivial
+    // peak right at tau=0 (nsdf[0] is always ~1) since that region never
+    // registers a crossing in the first place.
+    var peaks = [];
+    var t2 = 1;
+    while (t2 < maxLag - 1) {
+      if (nsdf[t2 - 1] <= 0 && nsdf[t2] > 0) {
+        var peakTau = t2, peakVal = nsdf[t2];
+        while (t2 < maxLag - 1 && nsdf[t2] > 0) {
+          if (nsdf[t2] > peakVal) { peakVal = nsdf[t2]; peakTau = t2; }
+          t2++;
+        }
+        peaks.push({ tau: peakTau, val: peakVal });
+      } else {
+        t2++;
+      }
+    }
+    if (!peaks.length) return -1;
+
+    var globalMax = 0;
+    for (var p = 0; p < peaks.length; p++) { if (peaks[p].val > globalMax) globalMax = peaks[p].val; }
+    if (globalMax < NSDF_CLARITY_MIN) return -1;
+
+    var chosen = peaks[0];
+    for (var p2 = 0; p2 < peaks.length; p2++) {
+      if (peaks[p2].val >= globalMax * KEY_MAX_FRACTION) { chosen = peaks[p2]; break; }
+    }
+
+    var T0 = chosen.tau;
+    var x1 = T0 > 0 ? nsdf[T0 - 1] : nsdf[T0], x2 = nsdf[T0], x3 = T0 < maxLag - 1 ? nsdf[T0 + 1] : nsdf[T0];
     var aa = (x1 + x3 - 2 * x2) / 2, bb = (x3 - x1) / 2;
     if (aa) T0 = T0 - bb / (2 * aa);
+    if (T0 <= 0) return -1;
     return sampleRate / T0;
   }
 
