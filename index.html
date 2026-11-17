@@ -1848,17 +1848,38 @@
     // straight to the one number that actually matters.
     rhythmCtx.strokeStyle = isLive ? "#eef3fb" : note.outlier ? "#5d6a85" : "#eef3fb";
     rhythmCtx.lineWidth = 2;
-    if (isLive) rhythmCtx.setLineDash([3, 2]); else rhythmCtx.setLineDash([]);
-    rhythmCtx.beginPath();
-    var pts = note.points, t0 = pts.length ? pts[0].ms : 0, spanMs = Math.max(1, note.durationMs);
-    for (var p = 0; p < pts.length; p++) {
-      var frac = Math.min(1, (pts[p].ms - t0) / spanMs);
-      var x = rhythmLaneX0 + frac * (tipX - rhythmLaneX0);
-      var y = c - Math.max(-6, Math.min(6, pts[p].cents * 0.08));
-      if (p === 0) rhythmCtx.moveTo(x, y); else rhythmCtx.lineTo(x, y);
+    if (isLive) {
+      // Still growing: draw its whole elapsed length from the lane start,
+      // dashed, with the live pitch wobble traced along it - this IS the
+      // note still being played, so it should look like something in
+      // progress, not a finished measurement.
+      rhythmCtx.setLineDash([3, 2]);
+      rhythmCtx.beginPath();
+      var pts = note.points, t0 = pts.length ? pts[0].ms : 0, spanMs = Math.max(1, note.durationMs);
+      for (var p = 0; p < pts.length; p++) {
+        var frac = Math.min(1, (pts[p].ms - t0) / spanMs);
+        var x = rhythmLaneX0 + frac * (tipX - rhythmLaneX0);
+        var y = c - Math.max(-6, Math.min(6, pts[p].cents * 0.08));
+        if (p === 0) rhythmCtx.moveTo(x, y); else rhythmCtx.lineTo(x, y);
+      }
+      rhythmCtx.stroke();
+      rhythmCtx.setLineDash([]);
+    } else if (!note.outlier) {
+      // Registered note: the full length (from the lane start) only tells
+      // you the raw duration, not which note value it was judged against -
+      // a 1/4 note +33% long and an 1/8 note some other error % can end up
+      // looking similar. Instead, anchor the mark at the TARGET duration's
+      // own gridline (so which note value it is is visually obvious - it
+      // lines up with that gridline) and draw only the deviation from it,
+      // toward the actual duration. A perfectly-in-time note is just a dot
+      // sitting on its gridline.
+      var snapped = rhythmSnapValue(note.durationMs / unit);
+      var targetX = rhythmXForDuration(snapped * unit);
+      rhythmCtx.beginPath();
+      rhythmCtx.moveTo(targetX, c);
+      rhythmCtx.lineTo(tipX, c);
+      rhythmCtx.stroke();
     }
-    rhythmCtx.stroke();
-    rhythmCtx.setLineDash([]);
 
     if (isLive) {
       var pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
