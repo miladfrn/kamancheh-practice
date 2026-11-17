@@ -781,7 +781,7 @@
 
   // ---------- audio graph ----------
   var audioCtx = null, analyser = null, sourceNode = null, gainNode = null, buf = null, freqBuf = null;
-  var fluxLoBin = 0, fluxHiBin = 0;
+  var fluxLoBin = 0, fluxHiBin = 0, binHzGlobal = 0;
   var micRunning = false;
   var inputGain = 6; // boosts quiet sources (singing, far mic) so detection still triggers
 
@@ -812,6 +812,7 @@
       // region (that's what the dip-then-rise energy check is for) and anything
       // above 8kHz (just noise on a phone mic)
       var binHz = audioCtx.sampleRate / analyser.fftSize;
+      binHzGlobal = binHz;
       fluxLoBin = Math.max(1, Math.round(300 / binHz));
       fluxHiBin = Math.min(freqBuf.length - 1, Math.round(8000 / binHz));
       sourceNode = audioCtx.createMediaStreamSource(stream);
@@ -1024,6 +1025,45 @@
   // separate cooldowns this produced extra ~100-300ms sliver segments right
   // after almost every real bow attack.
   var lastSplitAt = -1e9, SPLIT_COOLDOWN_MS = 250;
+  // Harmonic-vs-residual flux veto: a real bow re-attack re-excites the
+  // string's EXISTING harmonic series (fresh energy lands close to harmonics
+  // already present), while ordinary note-to-note dynamics in a fast passage
+  // spread their flux more broadly between harmonics - this is what actually
+  // distinguishes "freshly re-bowed" from "just continuing to sound", which
+  // amplitude alone (cue 1) and total flux alone (cue 2) both failed to
+  // separate on real recordings. Causal-only (window looks only at the
+  // PAST ~100ms, which is already available by the time either cue confirms
+  // a candidate) - costs zero added latency. Threshold chosen from a full
+  // end-to-end sweep on two recordings (one slow controlled bow-change test,
+  // one fast genuine re-attack test): 0.5 cut false splits ~45% but merged 2
+  // genuine fast bow changes; 0.6 cuts false splits only ~9% but exactly
+  // matches the ungated baseline on genuine fast bow changes (zero lost) -
+  // chosen over the stronger-looking 0.5 because losing a real note the
+  // player actually played is worse than an occasional missed false-split.
+  var harmResidHist = [];
+  var RESID_GATE_WINDOW_MS = 100, RESID_GATE_THRESHOLD = 0.6;
+  function midiToFreq(m) { return a4 * Math.pow(2, (m - 69) / 12); }
+  var harmonicBinSet = null, harmonicBinSetKey = null;
+  function harmonicBinsFor(midi, cents) {
+    var key = midi + "_" + Math.round(cents / 10);
+    if (harmonicBinSetKey === key && harmonicBinSet) return harmonicBinSet;
+    var f0 = midiToFreq(midi + cents / 100);
+    var set = {};
+    for (var k = 1; f0 * k <= fluxHiBin * binHzGlobal + 200; k++) {
+      var centerBin = f0 * k / binHzGlobal;
+      var toleranceBins = Math.max(1, (f0 * k * (Math.pow(2, 40 / 1200) - 1)) / binHzGlobal); // +-40 cents
+      for (var b = Math.floor(centerBin - toleranceBins); b <= Math.ceil(centerBin + toleranceBins); b++) set[b] = true;
+    }
+    harmonicBinSet = set; harmonicBinSetKey = key;
+    return set;
+  }
+  function residualFluxGatePass() {
+    var h = 0, r = 0;
+    for (var i = 0; i < harmResidHist.length; i++) { h += harmResidHist[i].harm; r += harmResidHist[i].resid; }
+    var tot = h + r;
+    if (tot < 1e-9) return true; // not enough spectral evidence yet - don't block on it
+    return (r / tot) < RESID_GATE_THRESHOLD;
+  }
   var windowStart = 0;
 
   var segments = [];       // contour runs: {midi, points:[{ms,cents}]}
@@ -2182,7 +2222,7 @@
         // the timestamp alive so a real, if gradual, recovery still counts.
         if (rms > prevReattackBaseline * REATTACK_RISE_RATIO) {
           if (reattackArmed && now - reattackDipAt < REATTACK_MAX_GAP_MS &&
-              now - lastSplitAt > SPLIT_COOLDOWN_MS) {
+              now - lastSplitAt > SPLIT_COOLDOWN_MS && residualFluxGatePass()) {
             reattackHit = true;
           }
           reattackDipAt = 0; // resolved - fired or not, the dip episode is over
@@ -2207,6 +2247,16 @@
         var d = Math.pow(10, freqBuf[fb] / 20) - Math.pow(10, prevSpectrum[fb] / 20);
         if (d > 0) flux += d;
       }
+      if (committedMidi !== null) {
+        var hbins = harmonicBinsFor(committedMidi, committedCentsEMA);
+        var fluxHarm = 0, fluxResid = 0;
+        for (var fbh = fluxLoBin; fbh <= fluxHiBin; fbh++) {
+          var ddh = Math.pow(10, freqBuf[fbh] / 20) - Math.pow(10, prevSpectrum[fbh] / 20);
+          if (ddh > 0) { if (hbins[fbh]) fluxHarm += ddh; else fluxResid += ddh; }
+        }
+        harmResidHist.push({ t: now, harm: fluxHarm, resid: fluxResid });
+        while (harmResidHist.length && now - harmResidHist[0].t > RESID_GATE_WINDOW_MS) harmResidHist.shift();
+      }
     } else {
       prevSpectrum = new Float32Array(freqBuf.length);
     }
@@ -2215,7 +2265,7 @@
     // reason as cue 1 — otherwise the spike itself slightly raises the bar
     // it's being measured against
     var fluxHit = soundActive && reattackArmed && flux > Math.max(REATTACK_FLUX_FLOOR, fluxBaseline * REATTACK_FLUX_MULT) &&
-      now - lastSplitAt > SPLIT_COOLDOWN_MS;
+      now - lastSplitAt > SPLIT_COOLDOWN_MS && residualFluxGatePass();
     // A real recording showed a single bow attack's volume can keep rising
     // for several hundred ms as the note speaks (not an instant jump), and
     // flux stays naturally elevated for that whole climb. A baseline that
