@@ -1781,6 +1781,19 @@
     if (!seg.armed) return;
     var startMs = seg.points[0].ms;
     var durationMs = Math.max(1, endMs - startMs);
+    // The Rhythm tab's own "lowest note value shown" zoom setting already
+    // tells us the shortest note the player actually expects to see — a
+    // beginner zoomed in to 1/4 notes is saying "I'm not playing anything
+    // shorter than that", so a detected note well under that value is far
+    // more likely a stray artifact (hand-position shift, string-crossing
+    // noise, a residual mic blip) than a real note, regardless of what
+    // caused it. Discard it outright — same as an unarmed segment — rather
+    // than showing it greyed out, which was still cluttering the view with
+    // exactly the short spurious rows this is meant to avoid. 75% (not
+    // 100%) of the grid's own floor, so a genuine note played a little
+    // short of the nominal value isn't punished for ordinary timing slop.
+    var gridFloorMs = Math.pow(2, rhythmLowExp) * (rhythmUnitMs || (60000 / bpm));
+    if (durationMs < gridFloorMs * 0.75) return;
     rhythmNotes.push({ midi: seg.midi, durationMs: durationMs, points: seg.points.slice(), outlier: durationMs < RHYTHM_FLOOR_MS });
     if (rhythmNotes.length > 300) rhythmNotes.shift();
     refitRhythmGrid();
