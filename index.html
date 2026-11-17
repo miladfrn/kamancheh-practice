@@ -1892,17 +1892,32 @@
       rhythmCtx.font = "10px 'JetBrains Mono', monospace";
       rhythmCtx.fillText("×", tipX + 6, c + 3.5);
     } else {
+      // A dot at the tip marks exactly where the note actually landed,
+      // same visual language as the live note's dot, so a finished note
+      // reads as "this got measured and stopped here" rather than just a
+      // bar that happens to end somewhere.
+      rhythmCtx.fillStyle = color;
+      rhythmCtx.beginPath(); rhythmCtx.arc(tipX, c, 3, 0, Math.PI * 2); rhythmCtx.fill();
+
       // Number drawn larger than the "%" sign, so the magnitude reads at a
       // glance while the sign stays a quiet unit label, not competing for
-      // attention.
-      rhythmCtx.fillStyle = color;
+      // attention. A negative error's bar already extends LEFT of the dot
+      // (toward a shorter duration), so the label goes on the left too -
+      // anchoring it to the right, as for a positive error, would print it
+      // back over the bar itself instead of past the open end.
       var e = rhythmErrorAgainst(note.durationMs, unit);
+      var negative = e < 0;
       var numLabel = (e >= 0 ? "+" : "") + Math.round(e);
       rhythmCtx.font = "13px 'JetBrains Mono', monospace";
-      rhythmCtx.fillText(numLabel, tipX + 6, c + 4.5);
       var numW = rhythmCtx.measureText(numLabel).width;
       rhythmCtx.font = "10px 'JetBrains Mono', monospace";
-      rhythmCtx.fillText("%", tipX + 7 + numW, c + 3.5);
+      var pctW = rhythmCtx.measureText("%").width;
+      var gap = 6, innerGap = 1;
+      var numX = negative ? tipX - gap - innerGap - pctW - numW : tipX + gap;
+      rhythmCtx.font = "13px 'JetBrains Mono', monospace";
+      rhythmCtx.fillText(numLabel, numX, c + 4.5);
+      rhythmCtx.font = "10px 'JetBrains Mono', monospace";
+      rhythmCtx.fillText("%", numX + numW + innerGap, c + 3.5);
     }
   }
   function drawRhythmPanel() {
