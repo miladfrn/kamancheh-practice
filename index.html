@@ -1616,6 +1616,12 @@
   }
   function addRhythmNote(seg, endMs) {
     if (!seg.points.length) return;
+    // Never confidently loud for even an instant — bow noise, a finger
+    // shift, breathing between two real notes — isn't a played note at
+    // all, so it doesn't get a row (not even a greyed-out one; that still
+    // cluttered the view with exactly the "lots of short unplayed notes"
+    // this is meant to avoid).
+    if (!seg.armed) return;
     var startMs = seg.points[0].ms;
     var durationMs = Math.max(1, endMs - startMs);
     rhythmNotes.push({ midi: seg.midi, durationMs: durationMs, points: seg.points.slice(), outlier: durationMs < RHYTHM_FLOOR_MS });
@@ -2053,6 +2059,13 @@
     // as a string of fake bow changes, all on the one (often wrongly very
     // high) pitch that tone autocorrelates to.
     var reattackArmed = reattackBaseline > NOISE_FLOOR * REATTACK_ARM_MULT;
+    // Mark the segment itself, not just this instant — a held note stays
+    // "armed" for its whole duration once it's been confidently loud even
+    // briefly, but a segment that NEVER gets here (bow noise, a finger
+    // shift, breathing between two real notes) is flagged below as an
+    // outlier regardless of what ended up splitting it off as its own
+    // segment, independent of how short or long it happened to run.
+    if (curSegment && reattackArmed) curSegment.armed = true;
     if (soundActive) {
       var prevReattackBaseline = reattackBaseline;
       if (rms < prevReattackBaseline * REATTACK_DIP_RATIO) {
@@ -2133,7 +2146,7 @@
         if (committedMidi !== null) {
           if (!curSegment || curSegment.midi !== committedMidi) {
             endCurrentSegment(activeMs);
-            curSegment = { midi: committedMidi, points: [] };
+            curSegment = { midi: committedMidi, points: [], armed: false };
             reattackStableSinceMs = activeMs;
           }
           curSegment.points.push({ ms: activeMs, cents: committedCentsEMA });
