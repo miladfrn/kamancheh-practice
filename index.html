@@ -457,7 +457,7 @@
       </div>
       <div id="rhythmStats">
         <div class="cap">fitted</div>
-        <div class="val" id="rhythmAvgErr">avg --</div>
+        <div class="val" id="rhythmAvgErr">median --</div>
         <div class="val" id="rhythmAvgBpm">-- bpm</div>
       </div>
       <div id="rhythmLast">
@@ -1755,24 +1755,22 @@
   }
   function updateRhythmStats() {
     if (!rhythmNotes.length || !rhythmUnitMs) {
-      rhythmAvgErr.textContent = "avg --"; rhythmAvgBpm.textContent = "-- bpm";
+      rhythmAvgErr.textContent = "median --"; rhythmAvgBpm.textContent = "-- bpm";
       rhythmLastErr.textContent = "--"; rhythmLastErr.style.color = "var(--fg-dim)";
       return;
     }
-    var kept = rhythmNotes.filter(function (n) { return !n.outlier; });
-    var avgErr = kept.length
-      ? kept.reduce(function (a, n) { return a + Math.abs(rhythmErrorAgainst(n.durationMs, rhythmUnitMs)); }, 0) / kept.length
-      : 0;
-    rhythmAvgErr.textContent = "avg " + Math.round(avgErr) + "%";
+    // Median, not mean - one wildly-off note (a stray split, a rushed
+    // phrase) shouldn't drag the whole-session number around the way an
+    // average would; the median reflects "how off is a typical note."
+    var absErrs = rhythmNotes.map(function (n) { return Math.abs(rhythmErrorAgainst(n.durationMs, rhythmUnitMs)); }).sort(function (a, b) { return a - b; });
+    var mid = Math.floor(absErrs.length / 2);
+    var medianErr = absErrs.length % 2 ? absErrs[mid] : (absErrs[mid - 1] + absErrs[mid]) / 2;
+    rhythmAvgErr.textContent = "median " + Math.round(medianErr) + "%";
     rhythmAvgBpm.textContent = Math.round(60000 / rhythmUnitMs) + " bpm";
     var last = rhythmNotes[rhythmNotes.length - 1];
-    if (last.outlier) {
-      rhythmLastErr.textContent = "×"; rhythmLastErr.style.color = "#5d6a85";
-    } else {
-      var e = rhythmErrorAgainst(last.durationMs, rhythmUnitMs);
-      rhythmLastErr.textContent = (e >= 0 ? "+" : "") + Math.round(e) + "%";
-      rhythmLastErr.style.color = rhythmSeverityColor(e);
-    }
+    var e = rhythmErrorAgainst(last.durationMs, rhythmUnitMs);
+    rhythmLastErr.textContent = (e >= 0 ? "+" : "") + Math.round(e) + "%";
+    rhythmLastErr.style.color = rhythmSeverityColor(e);
   }
   function addRhythmNote(seg, endMs) {
     if (!seg.points.length) return;
@@ -1795,9 +1793,12 @@
     // exactly the short spurious rows this is meant to avoid. 75% (not
     // 100%) of the grid's own floor, so a genuine note played a little
     // short of the nominal value isn't punished for ordinary timing slop.
+    // Still floored at RHYTHM_FLOOR_MS regardless of zoom/tempo, since
+    // nothing below the pitch detector's own ~46ms frame resolution could
+    // ever be a real measurement in the first place.
     var gridFloorMs = Math.pow(2, rhythmLowExp) * (rhythmUnitMs || (60000 / bpm));
-    if (durationMs < gridFloorMs * 0.75) return;
-    rhythmNotes.push({ midi: seg.midi, durationMs: durationMs, points: seg.points.slice(), outlier: durationMs < RHYTHM_FLOOR_MS });
+    if (durationMs < Math.max(RHYTHM_FLOOR_MS, gridFloorMs * 0.75)) return;
+    rhythmNotes.push({ midi: seg.midi, durationMs: durationMs, points: seg.points.slice() });
     if (rhythmNotes.length > 300) rhythmNotes.shift();
     refitRhythmGrid();
     updateRhythmStats();
@@ -1833,8 +1834,14 @@
     return rhythmLaneX0 + (exp - rhythmLowExp + RHYTHM_LEFT_BUFFER_OCT) * ppo;
   }
   function rhythmXForDuration(durationMs) {
-    if (!rhythmUnitMs) return rhythmLaneX0;
-    var exp = Math.log2(Math.max(1, durationMs) / rhythmUnitMs);
+    // Same fallback callers already use for the unit elsewhere (error %,
+    // snapping) - this used to short-circuit to the lane's left edge
+    // whenever rhythmUnitMs was still null (true for the very first note of
+    // a session, before any note has been registered to fit it), which
+    // stranded the live note's growing dot at the left edge instead of
+    // actually tracking its held duration.
+    var unit = rhythmUnitMs || (60000 / bpm);
+    var exp = Math.log2(Math.max(1, durationMs) / unit);
     exp = Math.max(rhythmLowExp - RHYTHM_LEFT_BUFFER_OCT, Math.min(rhythmHighExp + 0.5, exp));
     return rhythmXForExp(exp);
   }
@@ -1842,9 +1849,9 @@
     var c = rowTop + RHYTHM_ROW_H / 2;
     var unit = rhythmUnitMs || (60000 / bpm);
     var tipX = rhythmXForDuration(note.durationMs);
-    var color = isLive ? "#eef3fb" : note.outlier ? "#5d6a85" : rhythmSeverityColor(rhythmErrorAgainst(note.durationMs, unit));
+    var color = isLive ? "#eef3fb" : rhythmSeverityColor(rhythmErrorAgainst(note.durationMs, unit));
 
-    rhythmCtx.fillStyle = isLive ? "#c98a3a" : note.outlier ? "#5d6a85" : "#eef3fb";
+    rhythmCtx.fillStyle = isLive ? "#c98a3a" : "#eef3fb";
     rhythmCtx.font = "10.5px 'JetBrains Mono', monospace";
     rhythmCtx.textAlign = "left";
     rhythmCtx.fillText(noteLabel(note.midi), 4, c + 3.5);
@@ -1852,7 +1859,7 @@
     // The row itself (note name + bar) stays white regardless of timing -
     // only the error percentage is colored by severity, so the eye goes
     // straight to the one number that actually matters.
-    rhythmCtx.strokeStyle = isLive ? "#eef3fb" : note.outlier ? "#5d6a85" : "#eef3fb";
+    rhythmCtx.strokeStyle = "#eef3fb";
     rhythmCtx.lineWidth = 2;
     if (isLive) {
       // Still growing: draw its whole elapsed length from the lane start,
@@ -1870,7 +1877,7 @@
       }
       rhythmCtx.stroke();
       rhythmCtx.setLineDash([]);
-    } else if (!note.outlier) {
+    } else {
       // Registered note: the full length (from the lane start) only tells
       // you the raw duration, not which note value it was judged against -
       // a 1/4 note +33% long and an 1/8 note some other error % can end up
@@ -1893,10 +1900,6 @@
       rhythmCtx.fillStyle = "#eef3fb";
       rhythmCtx.beginPath(); rhythmCtx.arc(tipX, c, 3, 0, Math.PI * 2); rhythmCtx.fill();
       rhythmCtx.globalAlpha = 1;
-    } else if (note.outlier) {
-      rhythmCtx.fillStyle = color;
-      rhythmCtx.font = "10px 'JetBrains Mono', monospace";
-      rhythmCtx.fillText("×", tipX + 6, c + 3.5);
     } else {
       // A dot at the tip marks exactly where the note actually landed,
       // same visual language as the live note's dot, so a finished note
