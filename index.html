@@ -1820,16 +1820,22 @@
     var v = Math.pow(2, exp);
     return v >= 1 ? String(Math.round(v)) : "1/" + Math.round(1 / v);
   }
+  // The lowest gridline used to sit exactly at the lane's left edge, with no
+  // room for a negative-error bar/dot/label to extend further left without
+  // overlapping the row's note-name label - the highest gridline already
+  // gets a 0.5-octave buffer past it (the "+ 0.5" below) for the same reason
+  // on the positive side, this just mirrors it on the negative side.
+  var RHYTHM_LEFT_BUFFER_OCT = 0.5;
   function rhythmXForExp(exp) {
-    var span = (rhythmHighExp - rhythmLowExp) + 0.5;
+    var span = (rhythmHighExp - rhythmLowExp) + 0.5 + RHYTHM_LEFT_BUFFER_OCT;
     var laneW = Math.max(10, rhythmW - rhythmLaneX0 - rhythmLaneRight);
     var ppo = laneW / span;
-    return rhythmLaneX0 + (exp - rhythmLowExp) * ppo;
+    return rhythmLaneX0 + (exp - rhythmLowExp + RHYTHM_LEFT_BUFFER_OCT) * ppo;
   }
   function rhythmXForDuration(durationMs) {
     if (!rhythmUnitMs) return rhythmLaneX0;
     var exp = Math.log2(Math.max(1, durationMs) / rhythmUnitMs);
-    exp = Math.max(rhythmLowExp, Math.min(rhythmHighExp + 0.5, exp));
+    exp = Math.max(rhythmLowExp - RHYTHM_LEFT_BUFFER_OCT, Math.min(rhythmHighExp + 0.5, exp));
     return rhythmXForExp(exp);
   }
   function drawRhythmRow(rowTop, note, isLive) {
