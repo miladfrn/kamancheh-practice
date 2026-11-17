@@ -235,6 +235,37 @@
   }
   #bookRefLiveBtn:not(.on) { background: #13213cdd; }
 
+  /* ---- rhythm: one row per held note, log-scaled note-value grid ---- */
+  #rhythmPanel {
+    flex: 1 1 0; min-height: 0;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    overflow: hidden; position: relative;
+  }
+  #rhythmScroll {
+    width: 100%; height: 100%;
+    overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable;
+    -webkit-overflow-scrolling: touch;
+  }
+  #rhythmCanvas { display: block; width: 100%; }
+  #rhythmZoomLow, #rhythmZoomHigh {
+    position: absolute; top: 8px; z-index: 3; display: flex; gap: 4px;
+  }
+  #rhythmZoomLow { left: 44px; }
+  #rhythmZoomHigh { right: 26px; }
+  #rhythmZoomLow button, #rhythmZoomHigh button {
+    width: 26px; height: 26px; padding: 0; justify-content: center; font-size: 13px; background: #13213cdd;
+  }
+  #rhythmStats, #rhythmLast {
+    position: absolute; right: 26px; z-index: 3; text-align: right;
+    background: #13213cdd; border: 1px solid var(--line); border-radius: 8px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  #rhythmStats { top: 40px; padding: 5px 8px; }
+  #rhythmLast { bottom: 10px; padding: 5px 10px; }
+  #rhythmStats .cap, #rhythmLast .cap { font-size: 9px; color: var(--fg-dim); }
+  #rhythmStats .val { font-size: 11px; color: var(--fg-dim); }
+  #rhythmLast .val { font-size: 24px; font-weight: 700; line-height: 1; color: var(--fg-dim); }
+
   /* ---- scope panel ---- */
   #scopeOuter {
     flex: 1 1 0; min-height: 0;
@@ -393,6 +424,7 @@
       <button id="tabStaff" class="on">Staff</button>
       <button id="tabContour">Contour</button>
       <button id="tabBook"><span class="l1">Practice</span><span class="l2" id="tabBookSub" hidden></span></button>
+      <button id="tabRhythm">Rhythm</button>
     </div>
 
     <div id="piecePicker" hidden>
@@ -409,6 +441,29 @@
         <canvas id="bookRefCanvas"></canvas>
       </div>
       <button id="bookRefLiveBtn" class="on">● following live</button>
+    </div>
+
+    <div id="rhythmPanel" hidden>
+      <div id="rhythmScroll">
+        <canvas id="rhythmCanvas"></canvas>
+      </div>
+      <div id="rhythmZoomLow">
+        <button id="rhythmZoomLowOut" title="Show a smaller note value">&minus;</button>
+        <button id="rhythmZoomLowIn" title="Hide the smallest note value">+</button>
+      </div>
+      <div id="rhythmZoomHigh">
+        <button id="rhythmZoomHighOut" title="Hide the largest note value">&minus;</button>
+        <button id="rhythmZoomHighIn" title="Show a larger note value">+</button>
+      </div>
+      <div id="rhythmStats">
+        <div class="cap">fitted</div>
+        <div class="val" id="rhythmAvgErr">avg --</div>
+        <div class="val" id="rhythmAvgBpm">-- bpm</div>
+      </div>
+      <div id="rhythmLast">
+        <div class="cap">last note</div>
+        <div class="val" id="rhythmLastErr">--</div>
+      </div>
     </div>
 
     <div id="scopeOuter">
@@ -541,7 +596,13 @@
   var liveNoteName = $("liveNoteName"), liveNoteCents = $("liveNoteCents"), liveNoteFreq = $("liveNoteFreq");
   var controlBar = $("controlBar"), liveNote = $("liveNote");
 
-  var tabStaff = $("tabStaff"), tabContour = $("tabContour"), tabBook = $("tabBook");
+  var tabStaff = $("tabStaff"), tabContour = $("tabContour"), tabBook = $("tabBook"), tabRhythm = $("tabRhythm");
+  var scopeOuter = $("scopeOuter");
+  var rhythmPanel = $("rhythmPanel"), rhythmScroll = $("rhythmScroll");
+  var rhythmCanvas = $("rhythmCanvas"), rhythmCtx = rhythmCanvas.getContext("2d");
+  var rhythmZoomLowOut = $("rhythmZoomLowOut"), rhythmZoomLowIn = $("rhythmZoomLowIn");
+  var rhythmZoomHighOut = $("rhythmZoomHighOut"), rhythmZoomHighIn = $("rhythmZoomHighIn");
+  var rhythmAvgErr = $("rhythmAvgErr"), rhythmAvgBpm = $("rhythmAvgBpm"), rhythmLastErr = $("rhythmLastErr");
   var piecePicker = $("piecePicker"), piecePickerList = $("piecePickerList"), piecePickerClose = $("piecePickerClose");
   var tabBookSub = $("tabBookSub");
   var bookRefPanel = $("bookRefPanel"), bookRefScroll = $("bookRefScroll");
@@ -616,10 +677,16 @@
   function updateGutterAndOffsets() {
     // gutter is always visible now: cents numbers on Contour, note names
     // (at equal or pitch-scaled spacing) on Staff/Book Practice
+    scopeOuter.hidden = activeTab === "rhythm";
+    rhythmPanel.hidden = activeTab !== "rhythm";
     scopeGutter.hidden = false;
     scopeGutterNums.hidden = activeTab !== "contour";
     scopeGutterNotes.hidden = !isStaffLike(activeTab);
     bookRefPanel.hidden = activeTab !== "book";
+    if (activeTab === "rhythm") {
+      fitRhythmPanel(); drawRhythmPanel(); followRhythmPanel();
+      return;
+    }
     fitScopes();
     if (isStaffLike(activeTab)) renderGutterNotes();
     if (isStaffLike(activeTab)) drawStaff(); else drawContour();
@@ -631,12 +698,14 @@
     tabStaff.classList.toggle("on", t === "staff");
     tabContour.classList.toggle("on", t === "contour");
     tabBook.classList.toggle("on", t === "book");
+    tabRhythm.classList.toggle("on", t === "rhythm");
     staffCanvas.hidden = !isStaffLike(t);
     contourCanvas.hidden = t !== "contour";
     updateGutterAndOffsets();
   }
   tabStaff.addEventListener("click", function () { setTab("staff"); });
   tabContour.addEventListener("click", function () { setTab("contour"); });
+  tabRhythm.addEventListener("click", function () { setTab("rhythm"); });
   tabBook.addEventListener("click", function () {
     var wasActive = activeTab === "book";
     setTab("book");
@@ -870,7 +939,10 @@
     if (isStaffLike(activeTab)) renderGutterNotes();
     if (activeTab === "book") { fitBookRef(); drawBookRef(); followBookRef(); }
   }
-  window.addEventListener("resize", fitScopes);
+  window.addEventListener("resize", function () {
+    fitScopes();
+    fitRhythmPanel(); drawRhythmPanel(); followRhythmPanel();
+  });
 
   function usedWidthPx() {
     var w = Math.min(MAX_SECONDS, activeMs / 1000) * PX_PER_SEC;
@@ -1409,6 +1481,233 @@
     setBookStart(idx);
   });
 
+  // ---------- rhythm tab: one row per held note, a log-scaled note-value grid ----------
+  // Each row is read straight off the same `segments` the Staff/Book views
+  // already build (see endCurrentSegment) — no separate note detector. The
+  // grid's "1" unit isn't the dialed-in bpm itself: durations cluster at
+  // some common denominator (that's the circular-mean fit below), and the
+  // dialed-in bpm only breaks the octave tie — doubling/halving it fits the
+  // same data equally well, so we just pick whichever octave is closest to
+  // the bpm you already set rather than trying to detect tempo from scratch.
+  var RHYTHM_ROW_H = 30;
+  var RHYTHM_FLOOR_MS = 50; // below the pitch detector's own ~46ms (fftSize 2048) resolution
+  var RHYTHM_SNAP_VALUES = [0.0625, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16];
+  var RHYTHM_EXP_MIN = -4, RHYTHM_EXP_MAX = 6;
+  var rhythmNotes = [];     // {midi, durationMs, points:[{ms,cents}], outlier}
+  var rhythmUnitMs = null;  // fitted "1" (quarter-note-equivalent) duration, ms
+  var rhythmLowExp = -2, rhythmHighExp = 2; // visible range: 2^lowExp .. 2^highExp, drawn out to +0.5 octave past highExp
+  var rhythmW = 0;
+  var rhythmLaneX0 = 40, rhythmLaneRight = 36;
+
+  function rhythmSnapValue(ratio) {
+    var best = RHYTHM_SNAP_VALUES[0], bestDiff = Infinity;
+    RHYTHM_SNAP_VALUES.forEach(function (v) {
+      var d = Math.abs(Math.log2(Math.max(1e-6, ratio)) - Math.log2(v));
+      if (d < bestDiff) { bestDiff = d; best = v; }
+    });
+    return best;
+  }
+  function rhythmErrorAgainst(durationMs, unitMs) {
+    var ratio = durationMs / unitMs;
+    var snapped = rhythmSnapValue(ratio);
+    return (ratio / snapped - 1) * 100;
+  }
+  function rhythmSeverityColor(pct) {
+    var a = Math.abs(pct);
+    if (a <= 6) return "#7ab08f";
+    if (a <= 15) return "#d9a63a";
+    return "#d9693a";
+  }
+  // Durations that are honest power-of-two multiples of a common unit are
+  // evenly spaced in log2 space (doubling is always exactly +1.0), so the
+  // shared unit's *phase* is a circular-mean problem: treat log2(duration)
+  // mod 1 as an angle and average the vectors. The octave itself (which
+  // multiple is "1") is then picked as whichever one sits closest to the
+  // dialed-in bpm, since the phase alone can't tell 60 from 120 from 30.
+  function fitRhythmUnit(durationsMs) {
+    var candidates = durationsMs.filter(function (d) { return d >= RHYTHM_FLOOR_MS; });
+    if (candidates.length < 3) return 60000 / bpm;
+    var sumX = 0, sumY = 0;
+    candidates.forEach(function (d) {
+      var frac = Math.log2(d) - Math.floor(Math.log2(d));
+      var theta = frac * 2 * Math.PI;
+      sumX += Math.cos(theta); sumY += Math.sin(theta);
+    });
+    var meanFrac = Math.atan2(sumY, sumX) / (2 * Math.PI);
+    if (meanFrac < 0) meanFrac += 1;
+    var quarterMs = 60000 / bpm;
+    var k = Math.round(Math.log2(quarterMs) - meanFrac);
+    return Math.pow(2, k + meanFrac);
+  }
+  function refitRhythmGrid() {
+    var durations = rhythmNotes.map(function (n) { return n.durationMs; });
+    if (durations.length < 3) { rhythmUnitMs = 60000 / bpm; return; }
+    var T = fitRhythmUnit(durations);
+    // robust refinement: drop whatever doesn't fit even its own best octave
+    // well (median-based, so one or two true outliers can't drag the
+    // threshold itself around the way a mean+stdev cutoff would), then refit
+    var errs = durations.map(function (d) { return rhythmErrorAgainst(d, T); });
+    var sortedErrs = errs.slice().sort(function (a, b) { return a - b; });
+    var median = sortedErrs[Math.floor(sortedErrs.length / 2)];
+    var devs = errs.map(function (e) { return Math.abs(e - median); }).sort(function (a, b) { return a - b; });
+    var mad = devs[Math.floor(devs.length / 2)] || 1;
+    var thresh = Math.max(15, 3 * mad);
+    var keep = [];
+    durations.forEach(function (d, i) { if (Math.abs(errs[i] - median) <= thresh) keep.push(d); });
+    if (keep.length >= 3 && keep.length < durations.length) T = fitRhythmUnit(keep);
+    // refit periodically, not continuously — only move the grid once the fit
+    // has actually drifted, so it doesn't visibly jitter under every note
+    if (rhythmUnitMs == null || Math.abs(T / rhythmUnitMs - 1) > 0.02) rhythmUnitMs = T;
+  }
+  function updateRhythmStats() {
+    if (!rhythmNotes.length || !rhythmUnitMs) {
+      rhythmAvgErr.textContent = "avg --"; rhythmAvgBpm.textContent = "-- bpm";
+      rhythmLastErr.textContent = "--"; rhythmLastErr.style.color = "var(--fg-dim)";
+      return;
+    }
+    var kept = rhythmNotes.filter(function (n) { return !n.outlier; });
+    var avgErr = kept.length
+      ? kept.reduce(function (a, n) { return a + Math.abs(rhythmErrorAgainst(n.durationMs, rhythmUnitMs)); }, 0) / kept.length
+      : 0;
+    rhythmAvgErr.textContent = "avg " + Math.round(avgErr) + "%";
+    rhythmAvgBpm.textContent = Math.round(60000 / rhythmUnitMs) + " bpm";
+    var last = rhythmNotes[rhythmNotes.length - 1];
+    if (last.outlier) {
+      rhythmLastErr.textContent = "×"; rhythmLastErr.style.color = "#5d6a85";
+    } else {
+      var e = rhythmErrorAgainst(last.durationMs, rhythmUnitMs);
+      rhythmLastErr.textContent = (e >= 0 ? "+" : "") + Math.round(e) + "%";
+      rhythmLastErr.style.color = rhythmSeverityColor(e);
+    }
+  }
+  function addRhythmNote(seg, endMs) {
+    if (!seg.points.length) return;
+    var startMs = seg.points[0].ms;
+    var durationMs = Math.max(1, endMs - startMs);
+    rhythmNotes.push({ midi: seg.midi, durationMs: durationMs, points: seg.points.slice(), outlier: durationMs < RHYTHM_FLOOR_MS });
+    if (rhythmNotes.length > 300) rhythmNotes.shift();
+    refitRhythmGrid();
+    updateRhythmStats();
+    if (activeTab === "rhythm") { fitRhythmPanel(); drawRhythmPanel(); followRhythmPanel(); }
+  }
+
+  function fitRhythmPanel() {
+    var cw = rhythmScroll.clientWidth;
+    if (!cw) return;
+    rhythmW = cw;
+    var rows = rhythmNotes.length + 1; // +1 for the still-growing live row
+    var ch = Math.max(rhythmScroll.clientHeight || 0, rows * RHYTHM_ROW_H + 16);
+    rhythmCanvas.width = Math.max(1, Math.round(cw * dpr));
+    rhythmCanvas.height = Math.max(1, Math.round(ch * dpr));
+    rhythmCanvas.style.width = cw + "px";
+    rhythmCanvas.style.height = ch + "px";
+    rhythmCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  function rhythmExpToLabel(exp) {
+    var v = Math.pow(2, exp);
+    return v >= 1 ? String(Math.round(v)) : "1/" + Math.round(1 / v);
+  }
+  function rhythmXForExp(exp) {
+    var span = (rhythmHighExp - rhythmLowExp) + 0.5;
+    var laneW = Math.max(10, rhythmW - rhythmLaneX0 - rhythmLaneRight);
+    var ppo = laneW / span;
+    return rhythmLaneX0 + (exp - rhythmLowExp) * ppo;
+  }
+  function rhythmXForDuration(durationMs) {
+    if (!rhythmUnitMs) return rhythmLaneX0;
+    var exp = Math.log2(Math.max(1, durationMs) / rhythmUnitMs);
+    exp = Math.max(rhythmLowExp, Math.min(rhythmHighExp + 0.5, exp));
+    return rhythmXForExp(exp);
+  }
+  function drawRhythmRow(rowTop, note, isLive) {
+    var c = rowTop + RHYTHM_ROW_H / 2;
+    var unit = rhythmUnitMs || (60000 / bpm);
+    var tipX = rhythmXForDuration(note.durationMs);
+    var color = isLive ? "#eef3fb" : note.outlier ? "#5d6a85" : rhythmSeverityColor(rhythmErrorAgainst(note.durationMs, unit));
+
+    rhythmCtx.fillStyle = isLive ? "#c98a3a" : note.outlier ? "#5d6a85" : "#eef3fb";
+    rhythmCtx.font = "10.5px 'JetBrains Mono', monospace";
+    rhythmCtx.textAlign = "left";
+    rhythmCtx.fillText(noteLabel(note.midi), 4, c + 3.5);
+
+    rhythmCtx.strokeStyle = color;
+    rhythmCtx.lineWidth = 2;
+    if (isLive) rhythmCtx.setLineDash([3, 2]); else rhythmCtx.setLineDash([]);
+    rhythmCtx.beginPath();
+    var pts = note.points, t0 = pts.length ? pts[0].ms : 0, spanMs = Math.max(1, note.durationMs);
+    for (var p = 0; p < pts.length; p++) {
+      var frac = Math.min(1, (pts[p].ms - t0) / spanMs);
+      var x = rhythmLaneX0 + frac * (tipX - rhythmLaneX0);
+      var y = c - Math.max(-6, Math.min(6, pts[p].cents * 0.08));
+      if (p === 0) rhythmCtx.moveTo(x, y); else rhythmCtx.lineTo(x, y);
+    }
+    rhythmCtx.stroke();
+    rhythmCtx.setLineDash([]);
+
+    if (isLive) {
+      var pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
+      rhythmCtx.globalAlpha = 0.4 + 0.6 * pulse;
+      rhythmCtx.fillStyle = "#eef3fb";
+      rhythmCtx.beginPath(); rhythmCtx.arc(tipX, c, 3, 0, Math.PI * 2); rhythmCtx.fill();
+      rhythmCtx.globalAlpha = 1;
+    } else {
+      rhythmCtx.fillStyle = color;
+      rhythmCtx.font = "10px 'JetBrains Mono', monospace";
+      var label = note.outlier ? "×" : (function () {
+        var e = rhythmErrorAgainst(note.durationMs, unit);
+        return (e >= 0 ? "+" : "") + Math.round(e) + "%";
+      })();
+      rhythmCtx.fillText(label, tipX + 6, c + 3.5);
+    }
+  }
+  function drawRhythmPanel() {
+    if (!rhythmCtx || !rhythmW) return;
+    var h = rhythmCanvas.height / dpr;
+    rhythmCtx.clearRect(0, 0, rhythmW, h);
+
+    rhythmCtx.font = "9px 'JetBrains Mono', monospace";
+    rhythmCtx.textAlign = "center";
+    for (var exp = Math.ceil(rhythmLowExp); exp <= Math.floor(rhythmHighExp); exp++) {
+      var x = rhythmXForExp(exp);
+      rhythmCtx.strokeStyle = exp === 0 ? "#3a4f78" : "#2e4269";
+      rhythmCtx.lineWidth = exp === 0 ? 1.1 : 0.6;
+      rhythmCtx.beginPath(); rhythmCtx.moveTo(x, 0); rhythmCtx.lineTo(x, h); rhythmCtx.stroke();
+      rhythmCtx.fillStyle = exp === 0 ? "#c98a3a" : "#8ca0c4";
+      rhythmCtx.fillText(rhythmExpToLabel(exp), x, h - 4);
+    }
+
+    rhythmNotes.forEach(function (note, i) { drawRhythmRow(i * RHYTHM_ROW_H, note, false); });
+    if (curSegment && curSegment.points.length) {
+      var liveNote = { midi: curSegment.midi, durationMs: Math.max(1, activeMs - curSegment.points[0].ms), points: curSegment.points };
+      drawRhythmRow(rhythmNotes.length * RHYTHM_ROW_H, liveNote, true);
+    }
+  }
+  function followRhythmPanel() {
+    var viewH = rhythmScroll.clientHeight;
+    if (!viewH) return;
+    var totalH = (rhythmNotes.length + 1) * RHYTHM_ROW_H + 16;
+    if (totalH <= viewH) { rhythmScroll.scrollTop = 0; return; }
+    var maxScroll = totalH - viewH;
+    var half = Math.max(1, viewH / 2);
+    rhythmScroll.scrollTop = Math.min(maxScroll, Math.ceil(maxScroll / half) * half);
+  }
+  rhythmZoomLowOut.addEventListener("click", function () {
+    rhythmLowExp = Math.max(RHYTHM_EXP_MIN, rhythmLowExp - 1);
+    fitRhythmPanel(); drawRhythmPanel();
+  });
+  rhythmZoomLowIn.addEventListener("click", function () {
+    rhythmLowExp = Math.min(rhythmHighExp - 1, rhythmLowExp + 1);
+    fitRhythmPanel(); drawRhythmPanel();
+  });
+  rhythmZoomHighOut.addEventListener("click", function () {
+    rhythmHighExp = Math.max(rhythmLowExp + 1, rhythmHighExp - 1);
+    fitRhythmPanel(); drawRhythmPanel();
+  });
+  rhythmZoomHighIn.addEventListener("click", function () {
+    rhythmHighExp = Math.min(RHYTHM_EXP_MAX, rhythmHighExp + 1);
+    fitRhythmPanel(); drawRhythmPanel();
+  });
+
   // ---------- staff panel: real time, shows what you actually played ----------
   var BOOK_STATUS_COLOR = { hit: "#7ab08f", "wrong-rhythm": "#d9a63a", "wrong-pitch": "#d9693a", extra: "#8ca0c488" };
   function drawBookTarget(w) {
@@ -1666,6 +1965,7 @@
     segments.push(curSegment);
     if (activeTab === "book") processPlayedSegment(curSegment, atMs);
     else if (activeTab === "staff" && staffRhythmOn) analyzeStaffRhythm(curSegment, atMs);
+    addRhythmNote(curSegment, atMs);
     curSegment = null;
   }
 
@@ -1751,10 +2051,14 @@
       }
     }
 
-    if (isStaffLike(activeTab)) drawStaff(); else drawContour();
-    if (activeTab === "book") { drawBookRef(); followBookRef(); }
-    drawTimeAxis();
-    followScroll();
+    if (activeTab === "rhythm") {
+      drawRhythmPanel();
+    } else {
+      if (isStaffLike(activeTab)) drawStaff(); else drawContour();
+      if (activeTab === "book") { drawBookRef(); followBookRef(); }
+      drawTimeAxis();
+      followScroll();
+    }
 
     requestAnimationFrame(loop);
   }
