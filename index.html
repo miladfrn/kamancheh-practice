@@ -2194,7 +2194,17 @@
     // of its own life, not from an actual second stroke.
     var noteIsStable = curSegment && (activeMs - reattackStableSinceMs) > REATTACK_MIN_STABLE_MS;
     var reattackNow = (reattackHit || fluxHit) && noteIsStable;
-    var onsetSplit = onsetNow && noteIsStable;
+    // A real recording showed onsetNow has a second, separate false-positive
+    // mode the stability gate above doesn't touch: this instrument's attack
+    // can be a slow, smooth swell-in (rms climbing continuously for 200ms+
+    // with no dip at all) that happens to cross onsetThresh for the very
+    // first time well after the note already started — onsetNow's "was I
+    // below the threshold last frame" check can't tell that apart from a
+    // genuine second stroke. The real second-stroke case always has the
+    // note's own (slow-release) baseline already sitting clearly above the
+    // threshold beforehand, since it was loud before dipping; a first-ever
+    // climb never does, because the baseline is climbing right alongside it.
+    var onsetSplit = onsetNow && noteIsStable && (prevReattackBaseline || 0) > onsetThresh * 1.3;
 
     // A re-bowed/re-tongued repeat of the SAME pitch never shows up as a
     // committedMidi change, and legato bowing may never dip to true silence
