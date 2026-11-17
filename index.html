@@ -1006,13 +1006,24 @@
   // These thresholds are a starting point, not a validated result — there is
   // no published algorithm for this exact case (same-pitch re-attack on a
   // bowed string); expect to retune REATTACK_* against real playing.
-  var reattackBaseline = 0, reattackDipAt = 0, reattackCooldown = 0;
+  var reattackBaseline = 0, reattackDipAt = 0;
   var reattackStableSinceMs = 0;
   var fluxBaseline = 0, prevSpectrum = null;
   var REATTACK_ARM_MULT = 3; // only arm re-attack detection once the sustained level is clearly real playing, not borderline/ambient noise that happens to cross the general sound-active floor
   var REATTACK_DIP_RATIO = 0.72, REATTACK_RISE_RATIO = 0.88;
-  var REATTACK_MAX_GAP_MS = 150, REATTACK_COOLDOWN_MS = 90, REATTACK_MIN_STABLE_MS = 70;
+  var REATTACK_MAX_GAP_MS = 500, REATTACK_MIN_STABLE_MS = 70;
   var REATTACK_FLUX_MULT = 2.2, REATTACK_FLUX_FLOOR = 0.02;
+  // Single shared clock for "when did the current segment last start/split" -
+  // every cue that can end a segment (onset, reattack-dip, reattack-flux)
+  // checks against THIS SAME timestamp, instead of each keeping its own
+  // cooldown. Without this, one real bow-change recovery could get caught by
+  // two different cues at two different moments (e.g. the absolute-threshold
+  // onset cue fires early in the rise, then the relative dip-then-rise cue
+  // fires again ~100-200ms later on the SAME recovery) - producing two
+  // splits for one real event. Verified against real recordings: with
+  // separate cooldowns this produced extra ~100-300ms sliver segments right
+  // after almost every real bow attack.
+  var lastSplitAt = -1e9, SPLIT_COOLDOWN_MS = 250;
   var windowStart = 0;
 
   var segments = [];       // contour runs: {midi, points:[{ms,cents}]}
@@ -2059,7 +2070,7 @@
   var pendingAfterMic = null;
 
   // ---------- onset detection ----------
-  var lastRms = 0, onsetCooldown = 0;
+  var lastRms = 0;
   var belowOnsetSinceMs = 0;
   // How long the signal is allowed to have been sitting at/below the onset
   // threshold before a rise back above it still counts as a genuine new
@@ -2094,14 +2105,13 @@
     var now = performance.now();
 
     var onsetThresh = Math.max(0.025, NOISE_FLOOR * 6);
-    var onsetNow = rms > onsetThresh && lastRms <= onsetThresh && now - onsetCooldown > 150;
+    var onsetNow = rms > onsetThresh && lastRms <= onsetThresh && now - lastSplitAt > SPLIT_COOLDOWN_MS;
     // Explicit attack-time measurement: belowOnsetSinceMs marks when the
     // CURRENT stretch at/below onsetThresh began (set once, not refreshed
     // every frame it stays low — same idea as reattackDipAt below). Read
     // it BEFORE this frame's own update, so "how long was it low" reflects
     // the stretch that's ending right now, not a reset-to-zero value.
     var attackWasFast = onsetNow && belowOnsetSinceMs && (now - belowOnsetSinceMs) <= ONSET_MAX_RISE_MS;
-    if (onsetNow) onsetCooldown = now;
     lastRms = rms;
     if (rms <= onsetThresh) {
       if (!belowOnsetSinceMs) belowOnsetSinceMs = now;
@@ -2157,14 +2167,29 @@
         // below the ratio, or a long dip would keep looking "recent" and
         // fire a false re-attack whenever it eventually rose back up
         if (!reattackDipAt) reattackDipAt = now;
-      } else {
-        if (reattackArmed && reattackDipAt && now - reattackDipAt < REATTACK_MAX_GAP_MS &&
-            rms > prevReattackBaseline * REATTACK_RISE_RATIO &&
-            now - reattackCooldown > REATTACK_COOLDOWN_MS) {
-          reattackHit = true;
-          reattackCooldown = now;
+      } else if (reattackDipAt) {
+        // Back above the dip line, but that's NOT the same as "recovered":
+        // between the dip line (REATTACK_DIP_RATIO) and the rise line
+        // (REATTACK_RISE_RATIO) is a dead zone the signal passes through on
+        // every gradual recovery. This used to clear reattackDipAt the
+        // instant the signal ticked into that dead zone, regardless of
+        // REATTACK_MAX_GAP_MS - so the dip timestamp was erased before the
+        // rise check below ever got a chance to see it, and widening the
+        // gap allowance never fixed anything (confirmed on real recordings:
+        // 150/400/500ms all gave identical results). Now the dip episode
+        // only resolves once the signal has actually cleared the rise line,
+        // or the gap has truly timed out; the dead zone in between keeps
+        // the timestamp alive so a real, if gradual, recovery still counts.
+        if (rms > prevReattackBaseline * REATTACK_RISE_RATIO) {
+          if (reattackArmed && now - reattackDipAt < REATTACK_MAX_GAP_MS &&
+              now - lastSplitAt > SPLIT_COOLDOWN_MS) {
+            reattackHit = true;
+          }
+          reattackDipAt = 0; // resolved - fired or not, the dip episode is over
+        } else if (now - reattackDipAt >= REATTACK_MAX_GAP_MS) {
+          reattackDipAt = 0; // timed out without ever clearing the rise line
         }
-        reattackDipAt = 0; // dip episode over, recovered or timed out either way
+        // else: still recovering in the dead zone - leave reattackDipAt alone
       }
       reattackBaseline += (rms > reattackBaseline ? 0.5 : 0.03) * (rms - reattackBaseline);
     } else {
@@ -2190,7 +2215,7 @@
     // reason as cue 1 — otherwise the spike itself slightly raises the bar
     // it's being measured against
     var fluxHit = soundActive && reattackArmed && flux > Math.max(REATTACK_FLUX_FLOOR, fluxBaseline * REATTACK_FLUX_MULT) &&
-      now - reattackCooldown > REATTACK_COOLDOWN_MS;
+      now - lastSplitAt > SPLIT_COOLDOWN_MS;
     // A real recording showed a single bow attack's volume can keep rising
     // for several hundred ms as the note speaks (not an instant jump), and
     // flux stays naturally elevated for that whole climb. A baseline that
@@ -2201,7 +2226,6 @@
     // (but still fall slowly once it drops) fixes that, the same asymmetric
     // idea cue 1's amplitude baseline already uses.
     fluxBaseline += (flux > fluxBaseline ? 0.25 : 0.05) * (flux - fluxBaseline);
-    if (fluxHit) reattackCooldown = now;
 
     // Only let a re-attack cue force a fresh note once the pitch has been
     // holding steady for a bit — a genuine pitch CHANGE already splits the
@@ -2252,6 +2276,7 @@
             endCurrentSegment(activeMs);
             curSegment = { midi: committedMidi, points: [], armed: false };
             reattackStableSinceMs = activeMs;
+            lastSplitAt = now;
           }
           curSegment.points.push({ ms: activeMs, cents: committedCentsEMA });
           if (curSegment.points.length > 400) curSegment.points.shift();
