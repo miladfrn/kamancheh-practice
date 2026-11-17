@@ -2171,7 +2171,16 @@
     // it's being measured against
     var fluxHit = soundActive && reattackArmed && flux > Math.max(REATTACK_FLUX_FLOOR, fluxBaseline * REATTACK_FLUX_MULT) &&
       now - reattackCooldown > REATTACK_COOLDOWN_MS;
-    fluxBaseline += 0.05 * (flux - fluxBaseline);
+    // A real recording showed a single bow attack's volume can keep rising
+    // for several hundred ms as the note speaks (not an instant jump), and
+    // flux stays naturally elevated for that whole climb. A baseline that
+    // only ever creeps toward the current value at a fixed slow rate lags
+    // behind that climb, so partway through ONE attack it still looks like
+    // a fresh spike against a stale "normal" — splitting one bow stroke
+    // into two. Letting the baseline catch up quickly while flux is rising
+    // (but still fall slowly once it drops) fixes that, the same asymmetric
+    // idea cue 1's amplitude baseline already uses.
+    fluxBaseline += (flux > fluxBaseline ? 0.25 : 0.05) * (flux - fluxBaseline);
     if (fluxHit) reattackCooldown = now;
 
     // Only let a re-attack cue force a fresh note once the pitch has been
