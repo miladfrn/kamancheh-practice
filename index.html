@@ -797,6 +797,35 @@
   // requestMic(): just grants mic access and starts live pitch detection.
   // It does NOT start a recorded session — that happens via the Record
   // button in the control bar (startManual).
+  // Listens to whatever the mic picks up in true silence for a short stretch
+  // right after it's granted, and raises NOISE_FLOOR above the worst of it
+  // (with margin) if needed. Runs once per mic grant, not per practice
+  // session, since the room/mic's self-noise doesn't change session to
+  // session. Takes the PEAK observed level, not an average, since a single
+  // noise burst (a cough, a door) crossing the floor once is still enough to
+  // spawn a fake note later if the floor doesn't account for it.
+  var CALIBRATE_MS = 600, CALIBRATE_MARGIN = 2.5;
+  function calibrateAmbientNoise(done) {
+    setStatus("Calibrating to room noise — please stay silent…");
+    var calBuf = new Float32Array(analyser.fftSize);
+    var peak = 0, startedAt = performance.now();
+    function tick() {
+      analyser.getFloatTimeDomainData(calBuf);
+      var rms = 0;
+      for (var i = 0; i < calBuf.length; i++) rms += calBuf[i] * calBuf[i];
+      rms = Math.sqrt(rms / calBuf.length);
+      if (rms > peak) peak = rms;
+      if (performance.now() - startedAt < CALIBRATE_MS) {
+        requestAnimationFrame(tick);
+      } else {
+        ambientFloor = peak * CALIBRATE_MARGIN;
+        applySensitivity();
+        done();
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
   function requestMic() {
     setStatus("Requesting microphone…");
     navigator.mediaDevices.getUserMedia({
@@ -821,17 +850,20 @@
       sourceNode.connect(gainNode);
       gainNode.connect(analyser);
       micRunning = true;
-      statusEl.hidden = true;
-      setStatus("Microphone ready.");
-      fitScopes();
-      // the panel's measured height can be briefly stale right after the
-      // status overlay is hidden (seen on mobile Safari especially), which
-      // left the lower ledger lines positioned off-panel on first load —
-      // re-measure once layout has actually settled.
-      requestAnimationFrame(function () { requestAnimationFrame(function () { fitScopes(); }); });
-      setTimeout(fitScopes, 300);
-      requestAnimationFrame(loop);
-      if (pendingAfterMic) { var fn = pendingAfterMic; pendingAfterMic = null; fn(); }
+      calibrateAmbientNoise(finishMicSetup);
+      function finishMicSetup() {
+        statusEl.hidden = true;
+        setStatus("Microphone ready.");
+        fitScopes();
+        // the panel's measured height can be briefly stale right after the
+        // status overlay is hidden (seen on mobile Safari especially), which
+        // left the lower ledger lines positioned off-panel on first load —
+        // re-measure once layout has actually settled.
+        requestAnimationFrame(function () { requestAnimationFrame(function () { fitScopes(); }); });
+        setTimeout(fitScopes, 300);
+        requestAnimationFrame(loop);
+        if (pendingAfterMic) { var fn = pendingAfterMic; pendingAfterMic = null; fn(); }
+      }
     }).catch(function (err) {
       statusMsg.textContent = "Microphone permission was denied or unavailable (" + err.message + "). Allow mic access in your browser's site settings and reload.";
       statusBtn.hidden = false;
@@ -977,11 +1009,21 @@
     { label: "High++", floor: 0.0004, hold: 40, dip: 0.93 }
   ];
   var sensIdx = 1;
+  // Measured once per mic grant (see calibrateAmbientNoise): the actual
+  // ambient/self-noise floor THIS mic+room produces, with margin. A laptop's
+  // built-in mic can have far more self/ambient noise than a phone's, and
+  // the fixed inputGain boost amplifies that right along with real playing -
+  // without this, a noisy mic can sit above the sensitivity preset's floor
+  // permanently, so the app thinks something is always sounding and keeps
+  // spawning notes out of pure noise even in total silence. The sensitivity
+  // preset's own floor still acts as a MINIMUM (quiet, clean mics aren't
+  // penalized), this only ever raises it, never lowers it below the preset.
+  var ambientFloor = 0;
   var NOISE_FLOOR = SENS_LEVELS[sensIdx].floor;
   var SILENCE_HOLD_MS = SENS_LEVELS[sensIdx].hold;
   var DIP_RATIO = SENS_LEVELS[sensIdx].dip;
   function applySensitivity() {
-    NOISE_FLOOR = SENS_LEVELS[sensIdx].floor;
+    NOISE_FLOOR = Math.max(SENS_LEVELS[sensIdx].floor, ambientFloor);
     SILENCE_HOLD_MS = SENS_LEVELS[sensIdx].hold;
     DIP_RATIO = SENS_LEVELS[sensIdx].dip;
     sensToggle.textContent = SENS_LEVELS[sensIdx].label;
