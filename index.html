@@ -2177,19 +2177,25 @@
     // Only let a re-attack cue force a fresh note once the pitch has been
     // holding steady for a bit — a genuine pitch CHANGE already splits the
     // segment on its own a few lines below, so this is specifically for
-    // "same pitch, new bow stroke."
-    var reattackNow = (reattackHit || fluxHit) && curSegment &&
-      (activeMs - reattackStableSinceMs) > REATTACK_MIN_STABLE_MS;
+    // "same pitch, new bow stroke." A real recording showed this same
+    // stability gate needs to apply to onsetNow too: a bow's own initial
+    // "catch" is often a few tens of ms of jittery level before the tone
+    // settles, which can cross the onset threshold a second time almost
+    // immediately — splitting the note from itself within the first ~70ms
+    // of its own life, not from an actual second stroke.
+    var noteIsStable = curSegment && (activeMs - reattackStableSinceMs) > REATTACK_MIN_STABLE_MS;
+    var reattackNow = (reattackHit || fluxHit) && noteIsStable;
+    var onsetSplit = onsetNow && noteIsStable;
 
     // A re-bowed/re-tongued repeat of the SAME pitch never shows up as a
     // committedMidi change, and legato bowing may never dip to true silence
     // either — so on its own, this app can't tell "one long note" from "the
-    // same note played twice in a row." onsetNow (an absolute level crossing,
-    // for a real attack out of near-silence) and reattackNow (the relative/
-    // spectral cues above, for a shallow legato bow change) cover the two
-    // different cases; forcing curSegment to end on either gives every new
-    // attack a fresh blob, in every tab — not just Book Practice.
-    if ((onsetNow || reattackNow) && sessionStarted && !sessionPaused && curSegment) {
+    // same note played twice in a row." onsetSplit (an absolute level
+    // crossing, for a real attack out of near-silence) and reattackNow (the
+    // relative/spectral cues above, for a shallow legato bow change) cover
+    // the two different cases; forcing curSegment to end on either gives
+    // every new attack a fresh blob, in every tab — not just Book Practice.
+    if ((onsetSplit || reattackNow) && sessionStarted && !sessionPaused && curSegment) {
       endCurrentSegment(activeMs);
     }
 
