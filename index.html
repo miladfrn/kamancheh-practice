@@ -544,6 +544,20 @@
   // but correct) fundamental's peak.
   var KEY_MAX_FRACTION = 0.93;
   var NSDF_CLARITY_MIN = 0.8; // below this, treat it as noise/no clear pitch — tuned against a real recording (0.5 let ambient hum through as a confident, wrong, held note)
+  // A real kamancheh recording turned up a persistent ~48-50Hz component
+  // (mains hum, most likely) whose harmonics (48.5, 64.7, 97, 145.5, 194...)
+  // sat right alongside the real note's own period and occasionally won the
+  // peak-picking outright. MIN_FREQ excludes any candidate period below the
+  // instrument's realistic lowest note, which is well above that hum family.
+  var MIN_FREQ = 110;
+  // Continuity: even with MIN_FREQ, a real note's own strong harmonics can
+  // still occasionally out-score its own fundamental on a single frame (the
+  // same recording showed this too). A real note doesn't jump to an
+  // unrelated harmonic/subharmonic frame-to-frame, so prefer whichever
+  // reasonably strong peak is closest to the last good reading over
+  // blindly taking the first peak near that frame's own global max.
+  var CONTINUITY_CENTS = 150, CONTINUITY_MIN_FRACTION = 0.75;
+  var lastGoodFreq = 0;
   function autoCorrelate(buf, sampleRate) {
     var SIZE = buf.length;
     var rms = 0;
@@ -555,7 +569,7 @@
     // so "High"/"High+" really do reach quieter playing, not just gaps.
     if (rms < NOISE_FLOOR) return -1;
 
-    var maxLag = Math.floor(SIZE / 2);
+    var maxLag = Math.min(Math.floor(SIZE / 2), Math.floor(sampleRate / MIN_FREQ));
     var nsdf = new Float32Array(maxLag);
     for (var tau = 0; tau < maxLag; tau++) {
       var acf = 0, divisor = 0;
@@ -590,9 +604,21 @@
     for (var p = 0; p < peaks.length; p++) { if (peaks[p].val > globalMax) globalMax = peaks[p].val; }
     if (globalMax < NSDF_CLARITY_MIN) return -1;
 
-    var chosen = peaks[0];
-    for (var p2 = 0; p2 < peaks.length; p2++) {
-      if (peaks[p2].val >= globalMax * KEY_MAX_FRACTION) { chosen = peaks[p2]; break; }
+    var chosen = null;
+    if (lastGoodFreq > 0) {
+      var bestCentsDiff = Infinity;
+      for (var pc2 = 0; pc2 < peaks.length; pc2++) {
+        if (peaks[pc2].val < globalMax * CONTINUITY_MIN_FRACTION) continue;
+        var freqC = sampleRate / peaks[pc2].tau;
+        var centsDiff = Math.abs(1200 * Math.log2(freqC / lastGoodFreq));
+        if (centsDiff < CONTINUITY_CENTS && centsDiff < bestCentsDiff) { bestCentsDiff = centsDiff; chosen = peaks[pc2]; }
+      }
+    }
+    if (!chosen) {
+      chosen = peaks[0];
+      for (var p2 = 0; p2 < peaks.length; p2++) {
+        if (peaks[p2].val >= globalMax * KEY_MAX_FRACTION) { chosen = peaks[p2]; break; }
+      }
     }
 
     var T0 = chosen.tau;
@@ -600,7 +626,9 @@
     var aa = (x1 + x3 - 2 * x2) / 2, bb = (x3 - x1) / 2;
     if (aa) T0 = T0 - bb / (2 * aa);
     if (T0 <= 0) return -1;
-    return sampleRate / T0;
+    var outFreq = sampleRate / T0;
+    lastGoodFreq = outFreq;
+    return outFreq;
   }
 
   // ---------- DOM refs ----------
@@ -905,7 +933,7 @@
       candidateMidi = rounded; candidateSince = now;
     }
   }
-  function resetCommitted() { committedMidi = null; committedCentsEMA = 0; candidateMidi = null; }
+  function resetCommitted() { committedMidi = null; committedCentsEMA = 0; candidateMidi = null; lastGoodFreq = 0; }
 
   function updateLiveNoteUI() {
     if (committedMidi === null) {
