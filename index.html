@@ -381,6 +381,14 @@
         <span title="Space staff lines by real pitch distance">Pitch-scaled lines</span>
         <button id="pitchScaleToggle" class="on">On</button>
       </div>
+      <div id="rhythmTempoRow" class="headerPill">
+        <span title="What tempo rhythm detection (Staff + Rhythm tab) judges notes against">Rhythm tempo</span>
+        <button id="rhythmTempoToggle">Dialed-in</button>
+      </div>
+      <div id="rhythmDiscardRow" class="headerPill">
+        <span title="Drop detected notes much shorter than your dialed-in/fitted note value, instead of showing them">Discard short notes</span>
+        <button id="rhythmDiscardToggle" class="on">On</button>
+      </div>
       <button id="settingsClose" class="primary">Done</button>
     </div>
   </div>
@@ -690,6 +698,55 @@
     rhythmToggle.classList.toggle("on", staffRhythmOn);
   });
 
+  // These two settings apply ONLY to the Staff tab's "Detect Rhythm"
+  // overlay - the Rhythm tab's own tempo-fitting and its grid-based discard
+  // are untouched and keep their existing behavior.
+  //
+  // What tempo Staff-tab rhythm detection judges every note against.
+  // "dialed" uses the Beat/BPM dial directly, the way Staff-tab detection
+  // always has (the default - found more reliable in practice than
+  // auto-fitting). "auto" fits a tempo from recent STAFF note durations
+  // (its own independent fit, separate from the Rhythm tab's), the same
+  // median-based/outlier-resistant method, in case a tempo you didn't
+  // dial in exactly turns out to work better for you after all.
+  var rhythmTempoToggle = $("rhythmTempoToggle");
+  var staffTempoMode = "dialed"; // "dialed" | "auto"
+  var staffRhythmUnitMs = null, staffRhythmDurations = [];
+  rhythmTempoToggle.addEventListener("click", function () {
+    staffTempoMode = staffTempoMode === "dialed" ? "auto" : "dialed";
+    rhythmTempoToggle.textContent = staffTempoMode === "dialed" ? "Dialed-in" : "Auto-fit";
+    rhythmTempoToggle.classList.toggle("on", staffTempoMode === "auto");
+    saveSettings();
+  });
+  function refitStaffRhythmGrid(durationMs) {
+    staffRhythmDurations.push(durationMs);
+    if (staffRhythmDurations.length > 40) staffRhythmDurations.shift();
+    if (staffRhythmDurations.length >= 3) staffRhythmUnitMs = fitRhythmUnit(staffRhythmDurations);
+  }
+  function currentStaffRhythmUnitMs() {
+    return staffTempoMode === "auto" ? (staffRhythmUnitMs || (60000 / bpm)) : (60000 / bpm);
+  }
+
+  // Drop a Staff-tab note far shorter than a plausible note value (hand-
+  // position-shift noise, a string-crossing artifact, a residual mic blip)
+  // instead of stamping it with its own full notation symbol - on by
+  // default since a stray short segment was cluttering the staff with
+  // symbols for notes that were never really played. Exposed as a setting
+  // since a real very-short note is technically possible, however rare.
+  var rhythmDiscardToggle = $("rhythmDiscardToggle");
+  var staffDiscardShort = true;
+  var STAFF_RHYTHM_FLOOR_BEATS = 0.25; // shortest plausible note value, in beats
+  rhythmDiscardToggle.addEventListener("click", function () {
+    staffDiscardShort = !staffDiscardShort;
+    rhythmDiscardToggle.classList.toggle("on", staffDiscardShort);
+    saveSettings();
+  });
+  function isTooShortForStaffRhythm(durationMs) {
+    if (!staffDiscardShort) return false;
+    var floorMs = STAFF_RHYTHM_FLOOR_BEATS * currentStaffRhythmUnitMs();
+    return durationMs < Math.max(RHYTHM_FLOOR_MS, floorMs * 0.75);
+  }
+
   // Roll with time (default): the x-axis keeps moving at real speed even
   // through silence, so a rest between two notes shows as real empty space.
   // Pause on silence: the axis only advances while sound is heard, so gaps
@@ -720,7 +777,8 @@
   function saveSettings() {
     try {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-        a4: a4, rhythmLowExp: rhythmLowExp, rhythmHighExp: rhythmHighExp
+        a4: a4, rhythmLowExp: rhythmLowExp, rhythmHighExp: rhythmHighExp,
+        staffTempoMode: staffTempoMode, staffDiscardShort: staffDiscardShort
       }));
     } catch (e) { /* storage blocked/unavailable - setting just won't persist */ }
   }
@@ -737,6 +795,15 @@
         rhythmHighExp = Math.max(RHYTHM_EXP_MIN + 1, Math.min(RHYTHM_EXP_MAX, s.rhythmHighExp));
         rhythmLowExp = Math.max(RHYTHM_EXP_MIN, Math.min(rhythmHighExp - 1, s.rhythmLowExp));
         fitRhythmPanel(); drawRhythmPanel();
+      }
+      if (typeof s.staffTempoMode === "string") {
+        staffTempoMode = s.staffTempoMode === "auto" ? "auto" : "dialed";
+        rhythmTempoToggle.textContent = staffTempoMode === "dialed" ? "Dialed-in" : "Auto-fit";
+        rhythmTempoToggle.classList.toggle("on", staffTempoMode === "auto");
+      }
+      if (typeof s.staffDiscardShort === "boolean") {
+        staffDiscardShort = s.staffDiscardShort;
+        rhythmDiscardToggle.classList.toggle("on", staffDiscardShort);
       }
       if (typeof s.a4 === "number") setA4(s.a4);
     } catch (e) { /* corrupt/blocked storage - just keep the defaults */ }
@@ -1368,9 +1435,14 @@
   // snapped to the same value too (a genuinely back-to-back repeated figure),
   // which is what actually answers "were these consistent with each other."
   function analyzeStaffRhythm(seg, endMs) {
-    var nominalBeatMs = 60000 / bpm;
     var startMs = seg.points[0].ms;
     var heldMs = Math.max(1, endMs - startMs);
+    if (isTooShortForStaffRhythm(heldMs)) {
+      seg.rhythmBeats = null; seg.rhythmStartMs = null; seg.rhythmOffPct = null; seg.rhythmPairDeltaPct = null;
+      return;
+    }
+    if (staffTempoMode === "auto") refitStaffRhythmGrid(heldMs);
+    var nominalBeatMs = currentStaffRhythmUnitMs();
     var nominalBeats = heldMs / nominalBeatMs;
     var snapped = snapToNoteValue(nominalBeats);
     seg.rhythmBeats = snapped;
