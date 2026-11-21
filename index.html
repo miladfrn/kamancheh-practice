@@ -2271,15 +2271,23 @@
     // dots: snapped to the nearest note's line, or plotted at true continuous pitch
     // (semi-transparent in Book Practice and Staff, so the engraved notes
     // overlaid on top of them stay readable)
+    // Drawn as many small per-frame circles, not one stroked line per note -
+    // densely overlapping circles along a held note compound their alpha
+    // (each extra layer adds more coverage), so a "faded" alpha alone still
+    // reads brighter than expected once enough frames overlap. Shrinking
+    // the radius too, specifically for Detect Rhythm, cuts that overlap at
+    // the geometry level instead of just fighting it with more transparency.
+    var inRhythmMode = activeTab === "staff" && staffRhythmOn;
+    var dotRadius = inRhythmMode ? 1.1 : 2.1;
     staffCtx.fillStyle = "#eef3fb";
-    staffCtx.globalAlpha = activeTab === "book" ? 0.55 : (activeTab === "staff" && staffRhythmOn) ? 0.15 : 1;
+    staffCtx.globalAlpha = activeTab === "book" ? 0.55 : inRhythmMode ? 0.12 : 1;
     for (var n = 0; n < scatterPoints.length; n++) {
       var p = scatterPoints[n];
       var x = xOf(p.ms);
       if (x < -6 || x > w + 6) continue;
       var y = pitchScaled ? pitchScaleY(p.midi + p.cents / 100) : staffY(p.midi);
       staffCtx.beginPath();
-      staffCtx.arc(x, y, 2.1, 0, Math.PI * 2);
+      staffCtx.arc(x, y, dotRadius, 0, Math.PI * 2);
       staffCtx.fill();
       if (p.acc) {
         staffCtx.save();
