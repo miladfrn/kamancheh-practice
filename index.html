@@ -708,6 +708,11 @@
     staffRhythmOn = !staffRhythmOn;
     rhythmToggle.classList.toggle("on", staffRhythmOn);
     updateStaffRhythmStat();
+    // The main loop only keeps redrawing while the mic is actively running;
+    // with it stopped (reviewing a finished take), nothing else would ever
+    // repaint the canvas, leaving the dimmed/thin style on screen even
+    // after switching this back off.
+    if (isStaffLike(activeTab)) drawStaff();
   });
   // Median (not mean) absolute error across the currently-visible notes
   // that have been read, for the same reason the Rhythm tab uses median:
