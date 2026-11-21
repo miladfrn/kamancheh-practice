@@ -382,12 +382,16 @@
         <button id="pitchScaleToggle" class="on">On</button>
       </div>
       <div id="rhythmTempoRow" class="headerPill">
-        <span title="What tempo rhythm detection (Staff + Rhythm tab) judges notes against">Rhythm tempo</span>
+        <span title="What tempo Staff-tab Detect Rhythm judges notes against">Detect Rhythm tempo</span>
         <button id="rhythmTempoToggle">Dialed-in</button>
       </div>
       <div id="rhythmDiscardRow" class="headerPill">
-        <span title="Drop detected notes much shorter than your dialed-in/fitted note value, instead of showing them">Discard short notes</span>
+        <span title="Staff-tab Detect Rhythm: drop detected notes much shorter than a plausible note value, instead of showing them">Discard short notes</span>
         <button id="rhythmDiscardToggle" class="on">On</button>
+      </div>
+      <div id="rhythmMergeRow" class="headerPill">
+        <span title="Staff-tab Detect Rhythm: a bow change on the same pitch - merge into the held note, or read as its own note">Same-pitch notes</span>
+        <button id="rhythmMergeToggle" class="on">Merge</button>
       </div>
       <button id="settingsClose" class="primary">Done</button>
     </div>
@@ -747,6 +751,26 @@
     return durationMs < Math.max(RHYTHM_FLOOR_MS, floorMs * 0.75);
   }
 
+  // A same-pitch re-attack (bow change) doesn't change committedMidi, so on
+  // the staff graph itself it's drawn as one unbroken line - the player
+  // reads it as one note. "Merge" (default) makes Staff-tab rhythm reading
+  // agree with that: a bow change mid-sustain extends the current logical
+  // note instead of starting a new one, and only a genuine pitch change or
+  // silence ends it. "Split" restores reading every bow-change-driven
+  // split as its own note (closer to what the Rhythm tab does, which
+  // exists specifically to catch bow articulation). This is bookkeeping
+  // alongside the existing, UNCHANGED fine-grained segmentation - curSegment/
+  // segments themselves, the Rhythm tab, and Book Practice are unaffected.
+  var rhythmMergeToggle = $("rhythmMergeToggle");
+  var staffMergeSamePitch = true;
+  var staffRhythmRunStartMs = null, staffRhythmRunMidi = null;
+  rhythmMergeToggle.addEventListener("click", function () {
+    staffMergeSamePitch = !staffMergeSamePitch;
+    rhythmMergeToggle.textContent = staffMergeSamePitch ? "Merge" : "Split";
+    rhythmMergeToggle.classList.toggle("on", staffMergeSamePitch);
+    saveSettings();
+  });
+
   // Roll with time (default): the x-axis keeps moving at real speed even
   // through silence, so a rest between two notes shows as real empty space.
   // Pause on silence: the axis only advances while sound is heard, so gaps
@@ -778,7 +802,8 @@
     try {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify({
         a4: a4, rhythmLowExp: rhythmLowExp, rhythmHighExp: rhythmHighExp,
-        staffTempoMode: staffTempoMode, staffDiscardShort: staffDiscardShort
+        staffTempoMode: staffTempoMode, staffDiscardShort: staffDiscardShort,
+        staffMergeSamePitch: staffMergeSamePitch
       }));
     } catch (e) { /* storage blocked/unavailable - setting just won't persist */ }
   }
@@ -804,6 +829,11 @@
       if (typeof s.staffDiscardShort === "boolean") {
         staffDiscardShort = s.staffDiscardShort;
         rhythmDiscardToggle.classList.toggle("on", staffDiscardShort);
+      }
+      if (typeof s.staffMergeSamePitch === "boolean") {
+        staffMergeSamePitch = s.staffMergeSamePitch;
+        rhythmMergeToggle.textContent = staffMergeSamePitch ? "Merge" : "Split";
+        rhythmMergeToggle.classList.toggle("on", staffMergeSamePitch);
       }
       if (typeof s.a4 === "number") setA4(s.a4);
     } catch (e) { /* corrupt/blocked storage - just keep the defaults */ }
@@ -1025,7 +1055,7 @@
     micRunning = false;
     var bookMsg = null;
     if (activeTab === "book") {
-      endCurrentSegment(activeMs);
+      endCurrentSegment(activeMs, true);
       realignBookAttempt();
       bookMsg = logBookAttempt();
     }
@@ -1434,8 +1464,8 @@
   // it compared to the immediately preceding note, but only when that note
   // snapped to the same value too (a genuinely back-to-back repeated figure),
   // which is what actually answers "were these consistent with each other."
-  function analyzeStaffRhythm(seg, endMs) {
-    var startMs = seg.points[0].ms;
+  function analyzeStaffRhythm(seg, endMs, startMsOverride) {
+    var startMs = startMsOverride != null ? startMsOverride : seg.points[0].ms;
     var heldMs = Math.max(1, endMs - startMs);
     if (isTooShortForStaffRhythm(heldMs)) {
       seg.rhythmBeats = null; seg.rhythmStartMs = null; seg.rhythmOffPct = null; seg.rhythmPairDeltaPct = null;
@@ -2353,12 +2383,30 @@
 
   // closes out whatever note is currently being held (if any), pushing it to
   // `segments` — the same blobs drawn on the staff graph — and, in book
-  // practice, reading its pitch/duration straight off that finished blob
-  function endCurrentSegment(atMs) {
+  // practice, reading its pitch/duration straight off that finished blob.
+  // forceEndStaffRun: false ONLY for a same-pitch re-attack (bow change) -
+  // every other reason this is called (genuine pitch change, silence,
+  // stopping) always ends the Staff-tab rhythm run regardless of mode.
+  function endCurrentSegment(atMs, forceEndStaffRun) {
     if (!curSegment) return;
     segments.push(curSegment);
     if (activeTab === "book") processPlayedSegment(curSegment, atMs);
-    else if (activeTab === "staff" && staffRhythmOn) analyzeStaffRhythm(curSegment, atMs);
+    else if (activeTab === "staff" && staffRhythmOn) {
+      var sameRunContinues = staffMergeSamePitch && !forceEndStaffRun &&
+        staffRhythmRunMidi === curSegment.midi && staffRhythmRunStartMs != null;
+      if (!sameRunContinues) {
+        var effectiveStart = (staffRhythmRunMidi === curSegment.midi && staffRhythmRunStartMs != null)
+          ? staffRhythmRunStartMs : curSegment.points[0].ms;
+        analyzeStaffRhythm(curSegment, atMs, effectiveStart);
+        // Clear rather than leave stale: otherwise resuming on the SAME
+        // pitch after a real gap (silence forced this finalize) would look,
+        // to the creation-time check below, like the pre-gap run never
+        // ended, wrongly carrying its start across the gap.
+        staffRhythmRunMidi = null; staffRhythmRunStartMs = null;
+      }
+      // sameRunContinues: do nothing further - the run (and its start) stays
+      // open, waiting for the next real boundary to finalize it.
+    }
     addRhythmNote(curSegment, atMs);
     curSegment = null;
   }
@@ -2534,11 +2582,11 @@
     // the two different cases; forcing curSegment to end on either gives
     // every new attack a fresh blob, in every tab — not just Book Practice.
     if ((onsetSplit || reattackNow) && sessionStarted && !sessionPaused && curSegment) {
-      endCurrentSegment(activeMs);
+      endCurrentSegment(activeMs, false); // same-pitch re-attack - Staff rhythm run may continue
     }
 
     if (!soundActive && wasActive) {
-      endCurrentSegment(activeMs);
+      endCurrentSegment(activeMs, true); // silence always ends the Staff rhythm run
       resetCommitted();
       lastDotPc = null;
     }
@@ -2553,10 +2601,16 @@
 
         if (committedMidi !== null) {
           if (!curSegment || curSegment.midi !== committedMidi) {
-            endCurrentSegment(activeMs);
+            endCurrentSegment(activeMs, true); // forced: if this really was a same-pitch reattack, curSegment already matched committedMidi and we wouldn't be here
             curSegment = { midi: committedMidi, points: [], armed: false };
             reattackStableSinceMs = activeMs;
             lastSplitAt = now;
+            // Seed a fresh Staff rhythm run for this new segment, UNLESS one
+            // is already open for this exact pitch (a same-pitch reattack
+            // just continued it, in which case its start must stay put).
+            if (!(staffMergeSamePitch && staffRhythmRunMidi === committedMidi && staffRhythmRunStartMs != null)) {
+              staffRhythmRunStartMs = activeMs; staffRhythmRunMidi = committedMidi;
+            }
           }
           curSegment.points.push({ ms: activeMs, cents: committedCentsEMA });
           if (curSegment.points.length > 400) curSegment.points.shift();
