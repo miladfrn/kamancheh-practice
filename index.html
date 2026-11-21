@@ -344,11 +344,9 @@
     gap: 14px; text-align: center; padding: 0 32px; z-index: 50;
   }
   #statusPortrait {
-    max-height: 34vh; width: auto; max-width: 70%;
-    border-radius: 10px; border: 1px solid var(--line);
-    box-shadow: 0 8px 28px #00000066;
+    width: 100%; max-width: 480px; height: auto;
   }
-  #status h2 { font-size: 20px; margin: 0; }
+  #status h2 { font-size: 20px; margin: 10px 0 0; }
   #status h2 .statusKicker { display: block; font-size: 17px; font-weight: 400; color: var(--fg-dim); letter-spacing: 0.03em; margin-bottom: 2px; }
   #status p { color: var(--fg-dim); font-size: 14px; max-width: 46ch; margin: 0; }
   [hidden] { display: none !important; }
@@ -516,7 +514,7 @@
 </div>
 
 <div id="status">
-  <img id="statusPortrait" src="portrait.jpg" alt="">
+  <img id="statusPortrait" src="landing-musicians.webp" alt="">
   <h2><span class="statusKicker">Kamancheh:</span>Play. Track. Improve.</h2>
   <p id="statusMsg"></p>
   <button id="statusBtn" class="primary">Allow microphone</button>
